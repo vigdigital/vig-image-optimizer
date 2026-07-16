@@ -1,0 +1,42 @@
+name: Build & Release
+
+# Tag a version (e.g. `git push origin v2.1.0`) → build a clean plugin zip
+# with the correct root folder and attach it to the GitHub Release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build clean plugin zip
+        run: |
+          set -euo pipefail
+          SLUG="${{ github.event.repository.name }}"
+          mkdir -p "build/$SLUG"
+          rsync -a \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.gitignore' \
+            --exclude='.distignore' \
+            --exclude='build' \
+            --exclude='README.md' \
+            ./ "build/$SLUG/"
+          ( cd build && zip -rq "$SLUG.zip" "$SLUG" )
+          echo "ASSET=build/$SLUG.zip" >> "$GITHUB_ENV"
+          echo "Built: build/$SLUG.zip"
+          unzip -l "build/$SLUG.zip" | head -20
+
+      - name: Attach zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          fail_on_unmatched_files: true
