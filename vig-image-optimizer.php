@@ -3,7 +3,7 @@
  * Plugin Name: VIG Image Optimizer
  * Plugin URI:  https://vigdigital.com
  * Description: Automatically optimizes images the moment they are uploaded to the Media Library — scales down to a maximum width (default 2000px, height preserved), compresses or converts to WebP, strips metadata, and can block oversized uploads. Existing images are never touched. Built by VIG Digital.
- * Version:     1.4.1
+ * Version:     1.5.0
  * Author:      VIG Digital
  * Author URI:  https://vigdigital.com
  * License:     GPL-2.0-or-later
@@ -55,6 +55,13 @@ class VIG_Image_Optimizer {
         add_action('admin_menu', [__CLASS__, 'menu']);
         add_action('admin_init', [__CLASS__, 'settings']);
         add_action('admin_notices', [__CLASS__, 'saved_notice']);
+
+        // Tối ưu ảnh CŨ (bulk).
+        require_once VIG_IMGOPT_PATH . 'includes/class-vio-bulk.php';
+        VIO_Bulk::register();
+        if (defined('WP_CLI') && WP_CLI) {
+            WP_CLI::add_command('vig-imgopt', 'VIO_Bulk_CLI');
+        }
     }
 
     public static function opts() {
@@ -109,14 +116,15 @@ class VIG_Image_Optimizer {
 
     /**
      * Tối ưu 1 file tại chỗ. Trả về path kết quả (có thể đổi đuôi), hoặc false nếu bỏ qua/lỗi.
+     * @param bool $keep_ext true = KHÔNG đổi đuôi (bỏ WebP + PNG→JPEG) — dùng cho ảnh CŨ để không phá tham chiếu.
      */
-    public static function optimize($file, $type) {
+    public static function optimize($file, $type, $keep_ext = false, $resize_width = true) {
         $o    = self::opts();
         $max  = (int) $o['max_width'];
         $orig = (int) @filesize($file);
 
         // ==== Convert sang WebP (nén tốt nhất, GIỮ được transparency) ====
-        if (($o['output_format'] ?? 'original') === 'webp' && self::webp_ok()) {
+        if (!$keep_ext && ($o['output_format'] ?? 'original') === 'webp' && self::webp_ok()) {
             $editor = wp_get_image_editor($file);
             if (!is_wp_error($editor)) {
                 $size = $editor->get_size();
@@ -142,7 +150,7 @@ class VIG_Image_Optimizer {
 
         // PNG lossy palette bằng Imagick (hiệu quả nhất) — giữ .png
         if ($type === 'image/png' && $o['png_mode'] === 'quantize' && extension_loaded('imagick')) {
-            if (self::png_quantize_imagick($file, $o)) return $file;
+            if (self::png_quantize_imagick($file, $o, $resize_width)) return $file;
             // lỗi → rơi xuống đường chung
         }
 
@@ -150,13 +158,13 @@ class VIG_Image_Optimizer {
         if (is_wp_error($editor)) return false;
 
         $size = $editor->get_size();
-        if (!empty($size['width']) && $size['width'] > $max) {
+        if ($resize_width && !empty($size['width']) && $size['width'] > $max) {
             $editor->resize($max, PHP_INT_MAX, false);   // CHỈ cap chiều ngang
         }
         $editor->set_quality((int) $o['jpeg_quality']);
 
         // PNG → JPEG (chỉ khi chắc chắn KHÔNG trong suốt) — CHỈ giữ nếu nhỏ hơn thật
-        if ($type === 'image/png' && $o['png_mode'] === 'to_jpeg' && !self::png_has_alpha($file)) {
+        if (!$keep_ext && $type === 'image/png' && $o['png_mode'] === 'to_jpeg' && !self::png_has_alpha($file)) {
             $new   = preg_replace('/\.png$/i', '.jpg', $file);
             if ($new === $file) $new .= '.jpg';
             $saved = $editor->save($new, 'image/jpeg');
@@ -185,12 +193,12 @@ class VIG_Image_Optimizer {
     }
 
     /** PNG lossy qua Imagick: resize width + giảm màu + nén tối đa. */
-    private static function png_quantize_imagick($file, $o) {
+    private static function png_quantize_imagick($file, $o, $resize_width = true) {
         try {
             $im  = new Imagick($file);
             $w   = $im->getImageWidth();
             $max = (int) $o['max_width'];
-            if ($w > $max) {
+            if ($resize_width && $w > $max) {
                 $h = (int) round($im->getImageHeight() * ($max / $w));
                 $im->resizeImage($max, $h, Imagick::FILTER_LANCZOS, 1);
             }
@@ -228,6 +236,74 @@ class VIG_Image_Optimizer {
         if (strlen($data) < 26) return true;
         $ct = ord($data[25]);
         return !($ct === 0 || $ct === 2);
+    }
+
+    /* ================= TỐI ƯU ẢNH CŨ (BULK) ================= */
+    public static function render_bulk_box() {
+        $pending = VIO_Bulk::count_pending();
+        $done    = VIO_Bulk::count_done();
+        $saved   = VIO_Bulk::total_saved();
+        $nonce   = wp_create_nonce('vig_imgopt_bulk');
+        ?>
+        <div style="background:#fff;border:1px solid #dcdcde;border-radius:6px;padding:16px 20px;margin-top:14px;max-width:820px">
+            <h2 style="margin-top:0">Tối ưu ảnh CŨ (đã có trong thư viện)</h2>
+            <p class="description" style="font-size:13px;max-width:720px">
+                Nén lại các ảnh đã upload từ trước — <strong>giữ nguyên đuôi &amp; tên file</strong> nên không phá liên kết trong bài viết. Xử lý cả bản gốc lẫn thumbnail. Ảnh đã tối ưu sẽ được bỏ qua ở lần chạy sau.
+            </p>
+            <p><strong>Chưa tối ưu:</strong> <span id="vio-pending"><?php echo (int) $pending; ?></span> ảnh
+               &nbsp;·&nbsp; <strong>Đã tối ưu:</strong> <span id="vio-done"><?php echo (int) $done; ?></span>
+               &nbsp;·&nbsp; <strong>Đã tiết kiệm:</strong> <span id="vio-saved"><?php echo esc_html(size_format($saved)); ?></span></p>
+
+            <p>
+                <label style="margin-right:16px"><input type="checkbox" id="vio-resize"> Resize bản gốc quá khổ về max-width (<?php echo (int) self::opts()['max_width']; ?>px) + regenerate thumbnail</label><br>
+                <label><input type="checkbox" id="vio-backup"> Giữ backup bản gốc (có thể hoàn tác — tốn thêm dung lượng)</label>
+            </p>
+
+            <p>
+                <button type="button" class="button button-primary" id="vio-start" <?php disabled($pending, 0); ?>>Bắt đầu tối ưu</button>
+                <button type="button" class="button" id="vio-stop" style="display:none">Dừng</button>
+            </p>
+            <div id="vio-progress-wrap" style="display:none;max-width:520px">
+                <div style="background:#f0f0f1;border-radius:6px;overflow:hidden;height:22px"><div id="vio-bar" style="height:100%;width:0;background:#2271b1;transition:width .3s"></div></div>
+                <p id="vio-status" style="font-size:13px;color:#50575e;margin:6px 0 0"></p>
+            </div>
+
+            <script>
+            (function(){
+                var start=document.getElementById('vio-start'),stop=document.getElementById('vio-stop'),
+                    wrap=document.getElementById('vio-progress-wrap'),bar=document.getElementById('vio-bar'),
+                    status=document.getElementById('vio-status'),
+                    ep=<?php echo (int) $pending; ?>, total=ep, running=false;
+                function run(){
+                    if(!running) return;
+                    var fd=new FormData();
+                    fd.append('action','vig_imgopt_bulk');
+                    fd.append('nonce','<?php echo esc_js($nonce); ?>');
+                    fd.append('batch','5');
+                    fd.append('resize',document.getElementById('vio-resize').checked?'1':'');
+                    fd.append('backup',document.getElementById('vio-backup').checked?'1':'');
+                    fetch(ajaxurl,{method:'POST',body:fd,credentials:'same-origin'})
+                    .then(function(r){return r.json();})
+                    .then(function(j){
+                        if(!j.success){ status.textContent='Lỗi: '+((j.data&&j.data.message)||'?'); running=false; reset(); return; }
+                        var d=j.data, doneNow=total-d.remaining;
+                        bar.style.width=(total?Math.round(doneNow/total*100):100)+'%';
+                        status.textContent='Đã xử lý '+doneNow+' / '+total+' · còn '+d.remaining+' · tiết kiệm '+fmt(d.total_saved);
+                        document.getElementById('vio-pending').textContent=d.remaining;
+                        document.getElementById('vio-done').textContent=d.done;
+                        document.getElementById('vio-saved').textContent=fmt(d.total_saved);
+                        if(d.remaining>0 && running){ run(); }
+                        else { running=false; status.textContent='Xong ✓ '+status.textContent; reset(); }
+                    }).catch(function(e){ status.textContent='Lỗi mạng: '+e; running=false; reset(); });
+                }
+                function fmt(b){ if(b<1024)return b+' B'; var u=['KB','MB','GB'],i=-1; do{b/=1024;i++;}while(b>=1024&&i<2); return b.toFixed(1)+' '+u[i]; }
+                function reset(){ start.style.display=''; stop.style.display='none'; }
+                start.addEventListener('click',function(){ running=true; wrap.style.display='block'; start.style.display='none'; stop.style.display=''; run(); });
+                stop.addEventListener('click',function(){ running=false; reset(); status.textContent+=' (đã dừng)'; });
+            })();
+            </script>
+        </div>
+        <?php
     }
 
     /* ================= ADMIN ================= */
@@ -274,6 +350,8 @@ class VIG_Image_Optimizer {
             <p style="padding:8px 12px;border-left:4px solid <?php echo $imagick ? '#46b450' : '#dba617'; ?>;background:<?php echo $imagick ? '#ecf7ed' : '#fcf3cd'; ?>;display:inline-block;margin-top:4px">
                 Image engine: <strong><?php echo $imagick ? 'Imagick ✓ — supports lossy PNG (keeps .png)' : 'GD only — lossy PNG is unavailable; use “Convert PNG → JPEG” for photos'; ?></strong>
             </p>
+
+            <?php self::render_bulk_box(); ?>
 
             <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start;margin-top:12px">
                 <!-- Settings -->
