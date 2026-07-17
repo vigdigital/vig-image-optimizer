@@ -11,13 +11,17 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class VIO_Bulk {
 
-	const META = '_vig_imgopt_done';
+	const META     = '_vig_imgopt_done';
+	const CRON     = 'vig_imgopt_cron';
+	const LOG      = 'vig_imgopt_cron_log';
 
 	public static function register(): void {
 		add_action( 'wp_ajax_vig_imgopt_bulk', array( __CLASS__, 'ajax' ) );
+		add_action( self::CRON, array( __CLASS__, 'cron_run' ) );
+		add_action( 'init', array( __CLASS__, 'reconcile_cron' ) );
 	}
 
-	/* ------------------------------------------------ query */
+	/* ------------------------------------------------ query (CŨ → MỚI theo ngày = theo thư mục YYYY/MM) */
 
 	private static function query_args( int $limit ): array {
 		return array(
@@ -26,11 +30,24 @@ class VIO_Bulk {
 			'post_mime_type' => array( 'image/jpeg', 'image/png', 'image/webp' ),
 			'posts_per_page' => $limit,
 			'fields'         => 'ids',
+			'orderby'        => 'date',
+			'order'          => 'ASC',   // cũ nhất trước → xử lý dần theo thư mục năm/tháng
 			'no_found_rows'  => false,
 			'meta_query'     => array(
 				array( 'key' => self::META, 'compare' => 'NOT EXISTS' ),
 			),
 		);
+	}
+
+	/** Thư mục YYYY/MM của ảnh cũ nhất chưa tối ưu (đang tới lượt). */
+	public static function current_folder(): string {
+		$ids = self::get_batch( 1 );
+		if ( empty( $ids ) ) {
+			return '';
+		}
+		$rel = (string) get_post_meta( $ids[0], '_wp_attached_file', true );
+		$dir = dirname( $rel );
+		return ( $dir && '.' !== $dir ) ? $dir : '(thư mục gốc)';
 	}
 
 	public static function count_pending(): int {
@@ -168,6 +185,69 @@ class VIO_Bulk {
 		if ( ! file_exists( $bdir . '.htaccess' ) ) {
 			@file_put_contents( $bdir . '.htaccess', "Require all denied\nDeny from all\n" );
 		}
+	}
+
+	/* ------------------------------------------------ CRON (tối ưu nền theo lịch) */
+
+	/** Đặt/gỡ lịch theo cài đặt. Gọi ở init (idempotent) + khi lưu settings. */
+	public static function reconcile_cron(): void {
+		$o        = VIG_Image_Optimizer::opts();
+		$enabled  = ! empty( $o['bulk_cron'] );
+		$interval = in_array( $o['bulk_cron_interval'] ?? 'hourly', array( 'hourly', 'twicedaily', 'daily' ), true ) ? $o['bulk_cron_interval'] : 'hourly';
+		$ts       = wp_next_scheduled( self::CRON );
+		$cur      = get_option( 'vig_imgopt_cron_interval' );
+
+		if ( $enabled ) {
+			if ( ! $ts || $cur !== $interval ) {
+				if ( $ts ) {
+					wp_unschedule_event( $ts, self::CRON );
+				}
+				wp_schedule_event( time() + 300, $interval, self::CRON );
+				update_option( 'vig_imgopt_cron_interval', $interval, false );
+			}
+		} elseif ( $ts ) {
+			wp_unschedule_event( $ts, self::CRON );
+			delete_option( 'vig_imgopt_cron_interval' );
+		}
+	}
+
+	/** Chạy 1 lô mỗi lần cron fire (cũ → mới). */
+	public static function cron_run(): void {
+		$o = VIG_Image_Optimizer::opts();
+		if ( empty( $o['bulk_cron'] ) ) {
+			return;
+		}
+		@set_time_limit( 0 );
+		$batch  = max( 1, (int) ( $o['bulk_cron_batch'] ?? 20 ) );
+		$resize = ! empty( $o['bulk_cron_resize'] );
+		$backup = ! empty( $o['bulk_cron_backup'] );
+		$folder = self::current_folder();
+
+		$ids   = self::get_batch( $batch );
+		$saved = 0;
+		$n     = 0;
+		foreach ( $ids as $id ) {
+			$r      = self::optimize_attachment( $id, $resize, $backup );
+			$saved += (int) ( $r['saved'] ?? 0 );
+			++$n;
+		}
+		update_option( self::LOG, array(
+			'at'        => time(),
+			'folder'    => $folder,
+			'processed' => $n,
+			'saved'     => $saved,
+			'remaining' => self::count_pending(),
+		), false );
+	}
+
+	public static function cron_status(): array {
+		return array(
+			'enabled'   => (bool) ( VIG_Image_Optimizer::opts()['bulk_cron'] ?? false ),
+			'next'      => wp_next_scheduled( self::CRON ),
+			'folder'    => self::current_folder(),
+			'remaining' => self::count_pending(),
+			'log'       => get_option( self::LOG, array() ),
+		);
 	}
 
 	/* ------------------------------------------------ AJAX */

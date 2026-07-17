@@ -3,7 +3,7 @@
  * Plugin Name: VIG Image Optimizer
  * Plugin URI:  https://vigdigital.com
  * Description: Automatically optimizes images the moment they are uploaded to the Media Library — scales down to a maximum width (default 2000px, height preserved), compresses or converts to WebP, strips metadata, and can block oversized uploads. Existing images are never touched. Built by VIG Digital.
- * Version:     1.5.0
+ * Version:     1.6.0
  * Author:      VIG Digital
  * Author URI:  https://vigdigital.com
  * License:     GPL-2.0-or-later
@@ -39,6 +39,12 @@ class VIG_Image_Optimizer {
         'strip_meta'    => 1,
         'block_over_mb' => 10,         // chặn upload ảnh nặng hơn ngưỡng này (MB); 0 = tắt
         'output_format' => 'webp',     // original | webp (mặc định WebP; tự fallback 'original' nếu host không hỗ trợ WebP)
+        // Tối ưu ảnh CŨ theo lịch nền (từ cũ → mới theo thư mục năm/tháng)
+        'bulk_cron'          => 0,
+        'bulk_cron_interval' => 'hourly',  // hourly | twicedaily | daily
+        'bulk_cron_batch'    => 20,
+        'bulk_cron_resize'   => 0,
+        'bulk_cron_backup'   => 0,
     ];
 
     public static function init() {
@@ -252,7 +258,19 @@ class VIG_Image_Optimizer {
             </p>
             <p><strong>Chưa tối ưu:</strong> <span id="vio-pending"><?php echo (int) $pending; ?></span> ảnh
                &nbsp;·&nbsp; <strong>Đã tối ưu:</strong> <span id="vio-done"><?php echo (int) $done; ?></span>
-               &nbsp;·&nbsp; <strong>Đã tiết kiệm:</strong> <span id="vio-saved"><?php echo esc_html(size_format($saved)); ?></span></p>
+               &nbsp;·&nbsp; <strong>Đã tiết kiệm:</strong> <span id="vio-saved"><?php echo esc_html(size_format($saved)); ?></span>
+               <?php $cf = VIO_Bulk::current_folder(); if ($cf): ?>&nbsp;·&nbsp; <strong>Đang tới thư mục:</strong> <code><?php echo esc_html($cf); ?></code><?php endif; ?></p>
+
+            <?php $cs = VIO_Bulk::cron_status(); if ($cs['enabled']): ?>
+                <p style="padding:8px 12px;border-left:4px solid #2271b1;background:#eef4fb">
+                    ⏱ <strong>Lịch nền: BẬT</strong>
+                    <?php echo $cs['next'] ? ' · lần tới ' . esc_html(get_date_from_gmt(gmdate('Y-m-d H:i:s', $cs['next']), 'H:i d/m')) : ''; ?>
+                    <?php if (!empty($cs['log']['at'])): ?>
+                        · lần trước: xử lý <?php echo (int) $cs['log']['processed']; ?> ảnh (thư mục <code><?php echo esc_html($cs['log']['folder'] ?: '—'); ?></code>), tiết kiệm <?php echo esc_html(size_format((int) $cs['log']['saved'])); ?>
+                    <?php endif; ?>
+                    <br><span class="description">Xử lý dần từ cũ đến mới, ~<?php echo (int) self::opts()['bulk_cron_batch']; ?> ảnh/lượt. Cấu hình ở phần "Lịch tối ưu ảnh cũ (nền)" bên dưới.</span>
+                </p>
+            <?php endif; ?>
 
             <p>
                 <label style="margin-right:16px"><input type="checkbox" id="vio-resize"> Resize bản gốc quá khổ về max-width (<?php echo (int) self::opts()['max_width']; ?>px) + regenerate thumbnail</label><br>
@@ -333,6 +351,11 @@ class VIG_Image_Optimizer {
             'strip_meta'   => empty($in['strip_meta']) ? 0 : 1,
             'block_over_mb' => max(0, min(1000, (int) ($in['block_over_mb'] ?? $d['block_over_mb']))),
             'output_format' => in_array(($in['output_format'] ?? ''), ['original','webp'], true) ? $in['output_format'] : $d['output_format'],
+            'bulk_cron'          => empty($in['bulk_cron']) ? 0 : 1,
+            'bulk_cron_interval' => in_array(($in['bulk_cron_interval'] ?? ''), ['hourly','twicedaily','daily'], true) ? $in['bulk_cron_interval'] : $d['bulk_cron_interval'],
+            'bulk_cron_batch'    => max(1, min(200, (int) ($in['bulk_cron_batch'] ?? $d['bulk_cron_batch']))),
+            'bulk_cron_resize'   => empty($in['bulk_cron_resize']) ? 0 : 1,
+            'bulk_cron_backup'   => empty($in['bulk_cron_backup']) ? 0 : 1,
         ];
     }
 
@@ -407,6 +430,32 @@ class VIG_Image_Optimizer {
                                     <p class="description">Reject any image upload larger than this and show an error to the uploader. <strong>0 = disabled</strong>. Default: 10 MB.</p></td>
                             </tr>
                         </table>
+
+                        <h2 style="margin-top:24px">Lịch tối ưu ảnh cũ (nền)</h2>
+                        <p class="description" style="max-width:640px">Tự tối ưu ảnh cũ theo lô ở chế độ nền, xử lý <strong>từ cũ đến mới</strong> (theo thư mục năm/tháng). Hợp với thư viện lớn — khỏi bấm tay.</p>
+                        <table class="form-table">
+                            <tr>
+                                <th scope="row">Bật lịch nền</th>
+                                <td><label><input type="checkbox" name="<?php echo self::OPT; ?>[bulk_cron]" value="1" <?php checked($o['bulk_cron'],1); ?>> Tự tối ưu ảnh cũ theo lịch</label></td>
+                            </tr>
+                            <tr>
+                                <th scope="row">Tần suất</th>
+                                <td><select name="<?php echo self::OPT; ?>[bulk_cron_interval]">
+                                    <?php foreach (['hourly'=>'Mỗi giờ','twicedaily'=>'Ngày 2 lần','daily'=>'Mỗi ngày'] as $k=>$lbl): ?>
+                                        <option value="<?php echo $k; ?>" <?php selected($o['bulk_cron_interval'],$k); ?>><?php echo $lbl; ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                &nbsp; Mỗi lần: <input type="number" name="<?php echo self::OPT; ?>[bulk_cron_batch]" value="<?php echo esc_attr($o['bulk_cron_batch']); ?>" min="1" max="200" style="width:80px"> ảnh</td>
+                            </tr>
+                            <tr>
+                                <th scope="row">Tuỳ chọn</th>
+                                <td>
+                                    <label style="display:block;margin-bottom:4px"><input type="checkbox" name="<?php echo self::OPT; ?>[bulk_cron_resize]" value="1" <?php checked($o['bulk_cron_resize'],1); ?>> Resize bản gốc quá khổ về max-width</label>
+                                    <label><input type="checkbox" name="<?php echo self::OPT; ?>[bulk_cron_backup]" value="1" <?php checked($o['bulk_cron_backup'],1); ?>> Giữ backup bản gốc</label>
+                                    <p class="description">wp-cron chỉ chạy khi site có truy cập. Thư viện rất lớn nên đặt cron thật (system cron gọi wp-cron.php) hoặc dùng <code>wp vig-imgopt bulk</code>.</p>
+                                </td>
+                            </tr>
+                        </table>
                         <?php submit_button('Save settings'); ?>
                     </form>
                 </div>
@@ -454,3 +503,9 @@ class VIG_Image_Optimizer {
 }
 
 add_action('plugins_loaded', ['VIG_Image_Optimizer', 'init']);
+
+// Gỡ lịch nền khi tắt plugin.
+register_deactivation_hook(__FILE__, function () {
+    $ts = wp_next_scheduled('vig_imgopt_cron');
+    if ($ts) wp_unschedule_event($ts, 'vig_imgopt_cron');
+});
