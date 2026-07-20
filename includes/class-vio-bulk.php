@@ -423,22 +423,43 @@ class VIO_Bulk {
 			$after_sz = (int) @filesize( $tmp );
 			@unlink( $tmp );
 
-			$max = 0;
+			// Thước đo: LỆCH ĐỘ SÁNG TRUNG BÌNH + lệch trung bình mỗi kênh.
+			// KHÔNG dùng "lệch 1 pixel cao nhất": đo trên 272 ảnh thật cho thấy ảnh hoàn toàn
+			// bình thường vẫn lệch tới 101/255 ở cạnh sắc nét (nhiễu JPEG) ⇒ báo động giả.
+			// Lỗi thật (colorspace) làm lệch ĐỘ SÁNG 36%, trong khi ảnh bình thường ≤0.5%.
+			$sum = 0; $n = 0; $max = 0;
 			foreach ( $before_px as $i => $b ) {
 				if ( ! isset( $after_px[ $i ] ) ) {
 					continue;
 				}
 				for ( $c = 0; $c < 3; $c++ ) {
-					$max = max( $max, abs( $b[ $c ] - $after_px[ $i ][ $c ] ) );
+					$d    = abs( $b[ $c ] - $after_px[ $i ][ $c ] );
+					$sum += $d;
+					$max  = max( $max, $d );
+					$n++;
 				}
 			}
+			$avg   = $n ? $sum / $n : 0;
+			$lum   = static function ( $px ) {
+				if ( ! $px ) { return 0.0; }
+				$t = 0.0;
+				foreach ( $px as $p ) { $t += 0.299 * $p[0] + 0.587 * $p[1] + 0.114 * $p[2]; }
+				return $t / count( $px );
+			};
+			$lb    = $lum( $before_px );
+			$la    = $lum( $after_px );
+			$shift = $lb > 0 ? abs( $la - $lb ) / $lb * 100 : 0.0;
+
 			$rows[] = array(
 				'file'      => basename( $src ),
 				'before'    => $before_sz,
 				'after'     => $after_sz,
 				'saved_pct' => $before_sz ? round( ( 1 - $after_sz / $before_sz ) * 100 ) : 0,
-				'max_diff'  => $max,
-				'ok'        => $max <= 12,   // ~5% — mắt thường không phân biệt được
+				'shift'     => round( $shift, 2 ),   // % lệch độ sáng — chỉ số CHÍNH
+				'avg_diff'  => round( $avg, 2 ),     // lệch trung bình mỗi kênh (/255)
+				'max_diff'  => $max,                 // chỉ để tham khảo, KHÔNG dùng để chấm đạt/không
+				// Ngưỡng hiệu chỉnh trên 272 ảnh thật: bình thường shift ≤0.5%, avg ≤5.1
+				'ok'        => ( $shift <= 3.0 && $avg <= 12.0 ),
 			);
 		}
 		return $rows;
@@ -570,10 +591,11 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			foreach ( $rows as $r ) {
 				$r['ok'] || $bad++;
 				\WP_CLI::log( sprintf(
-					'%s  %s → %s (-%d%%)  lệch màu tối đa %d/255  %s',
-					str_pad( substr( $r['file'], 0, 34 ), 35 ),
+					'%s  %s → %s (-%d%%)  lệch sáng %.2f%% · lệch TB %.1f/255  %s',
+					str_pad( substr( $r['file'], 0, 30 ), 31 ),
 					size_format( $r['before'] ), size_format( $r['after'] ),
-					$r['saved_pct'], $r['max_diff'], $r['ok'] ? '✅' : '⚠️  BẤT THƯỜNG'
+					$r['saved_pct'], $r['shift'], $r['avg_diff'],
+					$r['ok'] ? '✅' : '⚠️  BẤT THƯỜNG'
 				) );
 			}
 			if ( $bad ) {
