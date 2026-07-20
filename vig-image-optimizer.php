@@ -3,7 +3,7 @@
  * Plugin Name: VIG Image Optimizer
  * Plugin URI:  https://vigdigital.com
  * Description: Automatically optimizes images the moment they are uploaded to the Media Library — scales down to a maximum width (default 2000px, height preserved), compresses or converts to WebP, strips metadata, and can block oversized uploads. Existing images are never touched. Built by VIG Digital.
- * Version:     1.6.1
+ * Version:     1.7.0
  * Author:      VIG Digital
  * Author URI:  https://vigdigital.com
  * License:     GPL-2.0-or-later
@@ -154,9 +154,12 @@ class VIG_Image_Optimizer {
             }
         }
 
-        // PNG lossy palette bằng Imagick (hiệu quả nhất) — giữ .png
-        if ($type === 'image/png' && $o['png_mode'] === 'quantize' && extension_loaded('imagick')) {
-            if (self::png_quantize_imagick($file, $o, $resize_width)) return $file;
+        // PNG lossy — giữ .png. Ưu tiên pngquant (đúng thuật toán TinyPNG dùng: nén sâu
+        // hơn nhiều mà pixel gần như y hệt); không có thì dùng Imagick quantize.
+        if ($type === 'image/png' && $o['png_mode'] === 'quantize') {
+            if ($resize_width) self::resize_png_width($file, $max);
+            if (self::png_pngquant($file, $o)) return $file;
+            if (extension_loaded('imagick') && self::png_quantize_imagick($file, $o, false)) return $file;
             // lỗi → rơi xuống đường chung
         }
 
@@ -198,6 +201,60 @@ class VIG_Image_Optimizer {
         return $file;
     }
 
+    /** Hạ chiều ngang PNG về max (dùng editor chuẩn của WP). */
+    private static function resize_png_width($file, $max) {
+        $editor = wp_get_image_editor($file);
+        if (is_wp_error($editor)) return;
+        $s = $editor->get_size();
+        if (!empty($s['width']) && $s['width'] > (int) $max) {
+            $editor->resize((int) $max, PHP_INT_MAX, false);
+            $editor->save($file, 'image/png');
+        }
+    }
+
+    /**
+     * Nén PNG bằng pngquant — ĐÚNG thuật toán TinyPNG dùng (libimagequant).
+     * Nén sâu hơn Imagick quantize rất nhiều mà màu/độ sáng gần như y hệt.
+     * pngquant tự TỪ CHỐI (exit 99) khi không đạt ngưỡng chất lượng → giữ nguyên ảnh gốc.
+     * KHÔNG dùng --strip để giữ lại ICC profile (tránh ảnh bị xỉn màu).
+     */
+    private static function png_pngquant($file, $o) {
+        $bin = self::pngquant_bin();
+        if (!$bin) return false;
+        $colors = max(2, min(256, (int) $o['png_colors']));
+        $tmp    = $file . '-viotmp.png';
+        @unlink($tmp);
+        $cmd = escapeshellarg($bin) . ' --quality=65-90 --speed 3 --force --output '
+             . escapeshellarg($tmp) . ' ' . $colors . ' -- ' . escapeshellarg($file) . ' 2>&1';
+        $out = array(); $code = 1;
+        @exec($cmd, $out, $code);
+        if (0 !== $code || !file_exists($tmp) || !@filesize($tmp)) { @unlink($tmp); return false; }
+        if ((int) @filesize($tmp) < (int) @filesize($file)) { @rename($tmp, $file); return true; }
+        @unlink($tmp);
+        return false;   // không nhỏ hơn → giữ gốc
+    }
+
+    /** Tìm pngquant trên host (cache 1 ngày). '' nếu không có / exec bị chặn. */
+    private static function pngquant_bin() {
+        $c = get_transient('vig_imgopt_pngquant');
+        if (false !== $c) return ('0' === $c) ? false : $c;
+
+        $bin      = '';
+        $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+        if (function_exists('exec') && !in_array('exec', $disabled, true)) {
+            foreach (array('/usr/bin/pngquant', '/usr/local/bin/pngquant', '/opt/homebrew/bin/pngquant', '/opt/local/bin/pngquant') as $p) {
+                if (@is_executable($p)) { $bin = $p; break; }
+            }
+            if (!$bin) {
+                $out = array();
+                @exec('command -v pngquant 2>/dev/null', $out);
+                if (!empty($out[0]) && @is_executable(trim($out[0]))) $bin = trim($out[0]);
+            }
+        }
+        set_transient('vig_imgopt_pngquant', $bin ?: '0', DAY_IN_SECONDS);
+        return $bin ?: false;
+    }
+
     /** PNG lossy qua Imagick: resize width + giảm màu + nén tối đa. */
     private static function png_quantize_imagick($file, $o, $resize_width = true) {
         try {
@@ -237,8 +294,11 @@ class VIG_Image_Optimizer {
         try {
             $c = clone $im;
             $c->setImageColorspace(Imagick::COLORSPACE_SRGB);
+            // PHẢI bỏ alpha trước khi đo: quantize có thể thêm/bớt kênh alpha, mà CHANNEL_ALL
+            // tính cả alpha ⇒ mean lệch ~11% một cách giả tạo ⇒ lưới an toàn báo động nhầm.
+            $c->setImageAlphaChannel(Imagick::ALPHACHANNEL_REMOVE);
             $c->resizeImage(50, 0, Imagick::FILTER_BOX, 1);   // thu nhỏ cho nhanh
-            $s = $c->getImageChannelMean(Imagick::CHANNEL_ALL);
+            $s = $c->getImageChannelMean(Imagick::CHANNEL_RED | Imagick::CHANNEL_GREEN | Imagick::CHANNEL_BLUE);
             $c->clear();
             if (empty($s['mean'])) return null;
             $q = (float) Imagick::getQuantumRange()['quantumRangeLong'];

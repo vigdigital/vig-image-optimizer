@@ -250,6 +250,87 @@ class VIO_Bulk {
 		);
 	}
 
+	/* ------------------------------------------------ TỰ KIỂM TRA (an toàn: chỉ chạy trên BẢN SAO) */
+
+	/**
+	 * Chạy thử tối ưu trên bản sao của vài ảnh thật rồi đo mức lệch màu.
+	 * KHÔNG bao giờ đụng vào ảnh gốc. Dùng để kiểm tra TRƯỚC khi chạy hàng loạt.
+	 * @return array danh sách ['file','before','after','saved_pct','max_diff','ok']
+	 */
+	public static function selftest( int $n = 5 ): array {
+		$ids = get_posts( array(
+			'post_type'      => 'attachment',
+			'post_status'    => 'inherit',
+			'post_mime_type' => array( 'image/jpeg', 'image/png' ),
+			'posts_per_page' => max( 1, $n ),
+			'orderby'        => 'rand',
+			'fields'         => 'ids',
+		) );
+
+		$rows = array();
+		foreach ( $ids as $id ) {
+			$src = get_attached_file( $id );
+			if ( ! $src || ! file_exists( $src ) ) {
+				continue;
+			}
+			$type = (string) get_post_mime_type( $id );
+			$tmp  = $src . '-viotest.' . ( 'image/png' === $type ? 'png' : 'jpg' );
+			if ( ! @copy( $src, $tmp ) ) {
+				continue;
+			}
+
+			$before_px = self::sample_pixels( $tmp );
+			$before_sz = (int) @filesize( $tmp );
+
+			VIG_Image_Optimizer::optimize( $tmp, $type, true, false );   // giữ đuôi, không resize
+
+			$after_px = self::sample_pixels( $tmp );
+			$after_sz = (int) @filesize( $tmp );
+			@unlink( $tmp );
+
+			$max = 0;
+			foreach ( $before_px as $i => $b ) {
+				if ( ! isset( $after_px[ $i ] ) ) {
+					continue;
+				}
+				for ( $c = 0; $c < 3; $c++ ) {
+					$max = max( $max, abs( $b[ $c ] - $after_px[ $i ][ $c ] ) );
+				}
+			}
+			$rows[] = array(
+				'file'      => basename( $src ),
+				'before'    => $before_sz,
+				'after'     => $after_sz,
+				'saved_pct' => $before_sz ? round( ( 1 - $after_sz / $before_sz ) * 100 ) : 0,
+				'max_diff'  => $max,
+				'ok'        => $max <= 12,   // ~5% — mắt thường không phân biệt được
+			);
+		}
+		return $rows;
+	}
+
+	/** Lấy mẫu pixel theo lưới. Ép truecolor để đọc đúng cả ảnh palette. */
+	private static function sample_pixels( string $path ): array {
+		$im = @imagecreatefromstring( (string) @file_get_contents( $path ) );
+		if ( ! $im ) {
+			return array();
+		}
+		if ( function_exists( 'imagepalettetotruecolor' ) ) {
+			@imagepalettetotruecolor( $im );   // ảnh palette: imagecolorat trả CHỈ SỐ, không phải RGB
+		}
+		$w   = imagesx( $im );
+		$h   = imagesy( $im );
+		$out = array();
+		for ( $x = 1; $x < 8; $x++ ) {
+			for ( $y = 1; $y < 8; $y++ ) {
+				$c     = imagecolorat( $im, (int) ( $w * $x / 8 ), (int) ( $h * $y / 8 ) );
+				$out[] = array( ( $c >> 16 ) & 255, ( $c >> 8 ) & 255, $c & 255 );
+			}
+		}
+		imagedestroy( $im );
+		return $out;
+	}
+
 	/* ------------------------------------------------ AJAX */
 
 	public static function ajax(): void {
@@ -289,6 +370,34 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 * [--backup]  : giữ backup bản gốc (uploads/vig-imgopt-backup)
 		 * [--batch=<n>] : số ảnh mỗi lô (mặc định 10)
 		 */
+		/**
+		 * Chạy thử trên BẢN SAO của vài ảnh thật + đo lệch màu. Không đụng ảnh gốc.
+		 * Nên chạy TRƯỚC khi tối ưu hàng loạt.
+		 *
+		 * [--n=<số>] : số ảnh lấy mẫu (mặc định 5)
+		 */
+		public function selftest( $args, $assoc ) {
+			$rows = VIO_Bulk::selftest( max( 1, (int) ( $assoc['n'] ?? 5 ) ) );
+			if ( ! $rows ) {
+				\WP_CLI::warning( 'Không có ảnh nào để kiểm tra.' );
+				return;
+			}
+			$bad = 0;
+			foreach ( $rows as $r ) {
+				$r['ok'] || $bad++;
+				\WP_CLI::log( sprintf(
+					'%s  %s → %s (-%d%%)  lệch màu tối đa %d/255  %s',
+					str_pad( substr( $r['file'], 0, 34 ), 35 ),
+					size_format( $r['before'] ), size_format( $r['after'] ),
+					$r['saved_pct'], $r['max_diff'], $r['ok'] ? '✅' : '⚠️  BẤT THƯỜNG'
+				) );
+			}
+			if ( $bad ) {
+				\WP_CLI::error( "$bad ảnh lệch màu bất thường — ĐỪNG chạy hàng loạt, báo lại VIG." );
+			}
+			\WP_CLI::success( 'An toàn: màu sắc được giữ nguyên. Có thể chạy `wp vig-imgopt bulk`.' );
+		}
+
 		public function bulk( $args, $assoc ) {
 			$resize = isset( $assoc['resize'] );
 			$backup = isset( $assoc['backup'] );
