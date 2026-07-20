@@ -3,7 +3,7 @@
  * Plugin Name: VIG Image Optimizer
  * Plugin URI:  https://vigdigital.com
  * Description: Automatically optimizes images the moment they are uploaded to the Media Library — scales down to a maximum width (default 2000px, height preserved), compresses or converts to WebP, strips metadata, and can block oversized uploads. Existing images are never touched. Built by VIG Digital.
- * Version:     1.6.0
+ * Version:     1.6.1
  * Author:      VIG Digital
  * Author URI:  https://vigdigital.com
  * License:     GPL-2.0-or-later
@@ -208,10 +208,22 @@ class VIG_Image_Optimizer {
                 $h = (int) round($im->getImageHeight() * ($max / $w));
                 $im->resizeImage($max, $h, Imagick::FILTER_LANCZOS, 1);
             }
-            $im->quantizeImage(max(2, (int) $o['png_colors']), Imagick::COLORSPACE_RGB, 0, false, false);
+            // QUAN TRỌNG: phải là COLORSPACE_SRGB. Dùng COLORSPACE_RGB = RGB tuyến tính
+            // → ImageMagick chuyển ảnh sang linear rồi ghi ra như sRGB ⇒ ẢNH BỊ TỐI ĐI rõ rệt.
+            $before = self::mean_brightness($im);
+            $im->quantizeImage(max(2, (int) $o['png_colors']), Imagick::COLORSPACE_SRGB, 0, false, false);
             $im->setImageDepth(8);
             $im->setOption('png:compression-level', '9');
-            if (!empty($o['strip_meta'])) $im->stripImage();
+            if (!empty($o['strip_meta'])) self::strip_keep_icc($im);
+
+            // LƯỚI AN TOÀN: nếu độ sáng lệch bất thường (>8%) thì KHÔNG ghi đè — giữ ảnh gốc.
+            // Chính lỗi colorspace ở trên từng làm ảnh tối đi ~36% mà không ai phát hiện.
+            $after = self::mean_brightness($im);
+            if (null !== $before && null !== $after && $before > 0 && abs($after - $before) / $before > 0.08) {
+                $im->clear();
+                return false;   // rơi xuống đường xử lý thường (an toàn)
+            }
+
             $im->writeImage($file);
             $im->clear();
             return true;
@@ -220,10 +232,41 @@ class VIG_Image_Optimizer {
         }
     }
 
+    /** Độ sáng trung bình 0..1 — dùng để phát hiện ảnh bị lệch màu/tối đi. null = không đo được. */
+    private static function mean_brightness(Imagick $im) {
+        try {
+            $c = clone $im;
+            $c->setImageColorspace(Imagick::COLORSPACE_SRGB);
+            $c->resizeImage(50, 0, Imagick::FILTER_BOX, 1);   // thu nhỏ cho nhanh
+            $s = $c->getImageChannelMean(Imagick::CHANNEL_ALL);
+            $c->clear();
+            if (empty($s['mean'])) return null;
+            $q = (float) Imagick::getQuantumRange()['quantumRangeLong'];
+            return $q > 0 ? ((float) $s['mean']) / $q : null;
+        } catch (\Throwable $e) {
+            return null;   // không đo được → bỏ qua lưới an toàn
+        }
+    }
+
     private static function strip_meta_imagick($file) {
         if (!extension_loaded('imagick')) return;
-        try { $im = new Imagick($file); $im->stripImage(); $im->writeImage($file); $im->clear(); }
+        try { $im = new Imagick($file); self::strip_keep_icc($im); $im->writeImage($file); $im->clear(); }
         catch (\Throwable $e) {}
+    }
+
+    /**
+     * Xoá EXIF/GPS/thumbnail nhưng GIỮ LẠI ICC color profile.
+     * stripImage() trần sẽ xoá luôn ICC → ảnh chụp bằng iPhone (Display P3) hay máy ảnh
+     * (Adobe RGB) bị trình duyệt hiểu nhầm thành sRGB ⇒ MÀU XỈN / TỐI ĐI.
+     * ICC chỉ vài trăm byte → giữ lại gần như không tốn dung lượng.
+     */
+    private static function strip_keep_icc(Imagick $im) {
+        $icc = '';
+        try { $icc = (string) $im->getImageProfile('icc'); } catch (\Throwable $e) {}
+        $im->stripImage();
+        if ($icc !== '') {
+            try { $im->profileImage('icc', $icc); } catch (\Throwable $e) {}
+        }
     }
 
     /** Engine có hỗ trợ ghi WebP không (GD imagewebp hoặc Imagick). */
