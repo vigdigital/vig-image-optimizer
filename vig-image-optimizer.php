@@ -3,7 +3,7 @@
  * Plugin Name: VIG Image Optimizer
  * Plugin URI:  https://vigdigital.com
  * Description: Automatically optimizes images the moment they are uploaded to the Media Library — scales down to a maximum width (default 2000px, height preserved), compresses or converts to WebP, strips metadata, and can block oversized uploads. Existing images are never touched. Built by VIG Digital.
- * Version:     1.7.0
+ * Version:     1.8.0
  * Author:      VIG Digital
  * Author URI:  https://vigdigital.com
  * License:     GPL-2.0-or-later
@@ -380,6 +380,36 @@ class VIG_Image_Optimizer {
                 <label><input type="checkbox" id="vio-backup"> Giữ backup bản gốc (có thể hoàn tác — tốn thêm dung lượng)</label>
             </p>
 
+            <?php $folders = VIO_Bulk::folders(); ?>
+            <table class="form-table" style="margin-top:4px">
+                <tr>
+                    <th scope="row" style="width:170px;padding-left:0">Phạm vi</th>
+                    <td style="padding-left:0">
+                        <select id="vio-folder" style="min-width:290px">
+                            <option value="" data-pending="<?php echo (int) $pending; ?>">Toàn bộ thư viện — <?php echo (int) $pending; ?> ảnh chưa tối ưu</option>
+                            <?php foreach ($folders as $f => $d): ?>
+                                <option value="<?php echo esc_attr($f); ?>" data-pending="<?php echo (int) $d['pending']; ?>" <?php disabled($d['pending'], 0); ?>>
+                                    📁 <?php echo esc_html($f); ?> — <?php echo (int) $d['pending']; ?>/<?php echo (int) $d['total']; ?> chưa tối ưu
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                        <p class="description">Chọn 1 thư mục năm/tháng để tối ưu từng phần thay vì chạy cả thư viện.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row" style="padding-left:0">Chạy thử 1 ảnh</th>
+                    <td style="padding-left:0">
+                        <input type="number" id="vio-one-id" class="small-text" placeholder="ID ảnh" min="1">
+                        <label style="margin-left:8px"><input type="checkbox" id="vio-one-force"> Chạy lại cả ảnh đã tối ưu</label>
+                        <button type="button" class="button" id="vio-one-run" style="margin-left:8px">Tối ưu ảnh này</button>
+                        <p class="description">
+                            Nên làm <strong>trước khi chạy hàng loạt</strong>. Lấy ID ở <a href="<?php echo esc_url(admin_url('upload.php?mode=list')); ?>">Thư viện</a> — rê chuột vào ảnh, xem số trong link <code>post=<strong>123</strong></code>.
+                        </p>
+                        <p id="vio-one-result" style="margin:6px 0 0"></p>
+                    </td>
+                </tr>
+            </table>
+
             <p>
                 <button type="button" class="button button-primary" id="vio-start" <?php disabled($pending, 0); ?>>Bắt đầu tối ưu</button>
                 <button type="button" class="button" id="vio-stop" style="display:none">Dừng</button>
@@ -394,13 +424,27 @@ class VIG_Image_Optimizer {
                 var start=document.getElementById('vio-start'),stop=document.getElementById('vio-stop'),
                     wrap=document.getElementById('vio-progress-wrap'),bar=document.getElementById('vio-bar'),
                     status=document.getElementById('vio-status'),
+                    folderSel=document.getElementById('vio-folder'),
                     ep=<?php echo (int) $pending; ?>, total=ep, running=false;
+
+                function scopePending(){
+                    var op=folderSel.options[folderSel.selectedIndex];
+                    return parseInt(op&&op.getAttribute('data-pending')||'0',10);
+                }
+                folderSel.addEventListener('change',function(){
+                    total=scopePending();
+                    start.disabled = total===0;
+                    status.textContent = total===0 ? 'Thư mục này đã tối ưu xong.' : '';
+                    bar.style.width='0';
+                });
+
                 function run(){
                     if(!running) return;
                     var fd=new FormData();
                     fd.append('action','vig_imgopt_bulk');
                     fd.append('nonce','<?php echo esc_js($nonce); ?>');
                     fd.append('batch','5');
+                    fd.append('folder',folderSel.value);
                     fd.append('resize',document.getElementById('vio-resize').checked?'1':'');
                     fd.append('backup',document.getElementById('vio-backup').checked?'1':'');
                     fetch(ajaxurl,{method:'POST',body:fd,credentials:'same-origin'})
@@ -419,8 +463,36 @@ class VIG_Image_Optimizer {
                 }
                 function fmt(b){ if(b<1024)return b+' B'; var u=['KB','MB','GB'],i=-1; do{b/=1024;i++;}while(b>=1024&&i<2); return b.toFixed(1)+' '+u[i]; }
                 function reset(){ start.style.display=''; stop.style.display='none'; }
-                start.addEventListener('click',function(){ running=true; wrap.style.display='block'; start.style.display='none'; stop.style.display=''; run(); });
+                start.addEventListener('click',function(){ total=scopePending(); running=true; wrap.style.display='block'; start.style.display='none'; stop.style.display=''; run(); });
                 stop.addEventListener('click',function(){ running=false; reset(); status.textContent+=' (đã dừng)'; });
+
+                // --- chạy thử đúng 1 ảnh ---
+                var oneBtn=document.getElementById('vio-one-run'), oneOut=document.getElementById('vio-one-result');
+                oneBtn.addEventListener('click',function(){
+                    var id=parseInt(document.getElementById('vio-one-id').value,10);
+                    if(!id){ oneOut.innerHTML='<span style="color:#b32d2e">Nhập ID ảnh trước.</span>'; return; }
+                    oneBtn.disabled=true; oneOut.textContent='Đang xử lý…';
+                    var fd=new FormData();
+                    fd.append('action','vig_imgopt_bulk');
+                    fd.append('nonce','<?php echo esc_js($nonce); ?>');
+                    fd.append('id',id);
+                    fd.append('force',document.getElementById('vio-one-force').checked?'1':'');
+                    fd.append('resize',document.getElementById('vio-resize').checked?'1':'');
+                    fd.append('backup',document.getElementById('vio-backup').checked?'1':'');
+                    fetch(ajaxurl,{method:'POST',body:fd,credentials:'same-origin'})
+                    .then(function(r){return r.json();})
+                    .then(function(j){
+                        oneBtn.disabled=false;
+                        if(!j.success){ oneOut.innerHTML='<span style="color:#b32d2e">Lỗi: '+((j.data&&j.data.message)||'?')+'</span>'; return; }
+                        var d=j.data;
+                        if(d.skipped){ oneOut.innerHTML='<span style="color:#996800">Ảnh này đã tối ưu rồi — tick "Chạy lại" nếu muốn ép chạy.</span>'; return; }
+                        var pct=d.before?Math.round((1-d.after/d.before)*100):0;
+                        oneOut.innerHTML='<span style="color:#007017">✓ '+d.file+': '+fmt(d.before)+' → '+fmt(d.after)+' (-'+pct+'%)</span> · <a href="<?php echo esc_url(admin_url('upload.php')); ?>?item='+id+'" target="_blank">xem ảnh</a>';
+                        document.getElementById('vio-pending').textContent=d.remaining;
+                        document.getElementById('vio-done').textContent=d.done;
+                        document.getElementById('vio-saved').textContent=fmt(d.total_saved);
+                    }).catch(function(e){ oneBtn.disabled=false; oneOut.innerHTML='<span style="color:#b32d2e">Lỗi mạng: '+e+'</span>'; });
+                });
             })();
             </script>
         </div>

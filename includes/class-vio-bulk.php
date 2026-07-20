@@ -23,7 +23,19 @@ class VIO_Bulk {
 
 	/* ------------------------------------------------ query (CŨ → MỚI theo ngày = theo thư mục YYYY/MM) */
 
-	private static function query_args( int $limit ): array {
+	private static function query_args( int $limit, string $folder = '' ): array {
+		$meta = array( array( 'key' => self::META, 'compare' => 'NOT EXISTS' ) );
+
+		// Lọc theo thư mục media (vd "2025/03"): _wp_attached_file bắt đầu bằng "2025/03/".
+		$folder = self::clean_folder( $folder );
+		if ( '' !== $folder ) {
+			$meta[] = array(
+				'key'     => '_wp_attached_file',
+				'value'   => '^' . preg_quote( $folder, '/' ) . '/',
+				'compare' => 'REGEXP',
+			);
+		}
+
 		return array(
 			'post_type'      => 'attachment',
 			'post_status'    => 'inherit',
@@ -33,10 +45,62 @@ class VIO_Bulk {
 			'orderby'        => 'date',
 			'order'          => 'ASC',   // cũ nhất trước → xử lý dần theo thư mục năm/tháng
 			'no_found_rows'  => false,
-			'meta_query'     => array(
-				array( 'key' => self::META, 'compare' => 'NOT EXISTS' ),
-			),
+			'meta_query'     => $meta,
 		);
+	}
+
+	/** Chỉ nhận dạng YYYY/MM — chặn ký tự lạ / path traversal. */
+	public static function clean_folder( string $f ): string {
+		$f = trim( str_replace( '\\', '/', $f ), '/ ' );
+		return preg_match( '#^[0-9]{4}/[0-9]{2}$#', $f ) ? $f : '';
+	}
+
+	/**
+	 * Danh sách thư mục năm/tháng trong Media + số ảnh tổng / chưa tối ưu.
+	 * @return array [ '2025/03' => ['total'=>int,'pending'=>int], ... ] (cũ → mới)
+	 */
+	public static function folders(): array {
+		global $wpdb;
+		$rows = $wpdb->get_results( $wpdb->prepare(
+			"SELECT SUBSTRING_INDEX(pm.meta_value,'/',2) AS folder,
+			        COUNT(*) AS total,
+			        SUM(CASE WHEN dm.post_id IS NULL THEN 1 ELSE 0 END) AS pending
+			   FROM {$wpdb->postmeta} pm
+			   INNER JOIN {$wpdb->posts} p
+			           ON p.ID = pm.post_id
+			          AND p.post_type = 'attachment'
+			          AND p.post_mime_type IN ('image/jpeg','image/png','image/webp')
+			   LEFT JOIN {$wpdb->postmeta} dm
+			          ON dm.post_id = pm.post_id AND dm.meta_key = %s
+			  WHERE pm.meta_key = '_wp_attached_file'
+			    AND pm.meta_value REGEXP '^[0-9]{4}/[0-9]{2}/'
+			  GROUP BY folder
+			  ORDER BY folder ASC",
+			self::META
+		) );
+
+		$out = array();
+		foreach ( (array) $rows as $r ) {
+			$out[ $r->folder ] = array( 'total' => (int) $r->total, 'pending' => (int) $r->pending );
+		}
+		return $out;
+	}
+
+	/** Tối ưu đúng 1 ảnh theo ID (để chạy thử). $force = bỏ dấu đã-tối-ưu để chạy lại. */
+	public static function optimize_one( int $id, bool $resize = false, bool $backup = false, bool $force = false ): array {
+		if ( 'attachment' !== get_post_type( $id ) ) {
+			return array( 'error' => 'ID không phải file media.' );
+		}
+		if ( $force ) {
+			delete_post_meta( $id, self::META );
+		}
+		$file   = get_attached_file( $id );
+		$before = $file && file_exists( $file ) ? (int) filesize( $file ) : 0;
+		$r      = self::optimize_attachment( $id, $resize, $backup );
+		$r['file']   = $file ? basename( $file ) : '';
+		$r['before'] = $before;
+		$r['after']  = $file && file_exists( $file ) ? (int) filesize( $file ) : 0;
+		return $r;
 	}
 
 	/** Thư mục YYYY/MM của ảnh cũ nhất chưa tối ưu (đang tới lượt). */
@@ -50,8 +114,8 @@ class VIO_Bulk {
 		return ( $dir && '.' !== $dir ) ? $dir : '(thư mục gốc)';
 	}
 
-	public static function count_pending(): int {
-		$q = new WP_Query( self::query_args( 1 ) );
+	public static function count_pending( string $folder = '' ): int {
+		$q = new WP_Query( self::query_args( 1, $folder ) );
 		return (int) $q->found_posts;
 	}
 
@@ -78,8 +142,8 @@ class VIO_Bulk {
 		return $sum;
 	}
 
-	public static function get_batch( int $limit ): array {
-		$q = new WP_Query( self::query_args( $limit ) );
+	public static function get_batch( int $limit, string $folder = '' ): array {
+		$q = new WP_Query( self::query_args( $limit, $folder ) );
 		return array_map( 'intval', $q->posts );
 	}
 
@@ -341,8 +405,34 @@ class VIO_Bulk {
 		$resize = ! empty( $_POST['resize'] );
 		$backup = ! empty( $_POST['backup'] );
 		$batch  = max( 1, min( 20, (int) ( $_POST['batch'] ?? 5 ) ) );
+		$folder_raw = (string) ( $_POST['folder'] ?? '' );
+		$folder     = self::clean_folder( $folder_raw );
+		// Không hợp lệ mà lại im lặng chạy TOÀN BỘ thư viện thì rất nguy hiểm → báo lỗi.
+		if ( '' !== $folder_raw && '' === $folder ) {
+			wp_send_json_error( array( 'message' => 'Thư mục không hợp lệ (phải dạng YYYY/MM).' ), 400 );
+		}
 
-		$ids       = self::get_batch( $batch );
+		// Chạy thử đúng 1 ảnh theo ID
+		$one = (int) ( $_POST['id'] ?? 0 );
+		if ( $one > 0 ) {
+			$r = self::optimize_one( $one, $resize, $backup, ! empty( $_POST['force'] ) );
+			if ( ! empty( $r['error'] ) ) {
+				wp_send_json_error( array( 'message' => $r['error'] ), 400 );
+			}
+			wp_send_json_success( array(
+				'single'      => true,
+				'file'        => $r['file'],
+				'before'      => (int) ( $r['before'] ?? 0 ),
+				'after'       => (int) ( $r['after'] ?? 0 ),
+				'skipped'     => ! empty( $r['skipped'] ),
+				'processed'   => 1,
+				'remaining'   => self::count_pending( $folder ),
+				'done'        => self::count_done(),
+				'total_saved' => self::total_saved(),
+			) );
+		}
+
+		$ids       = self::get_batch( $batch, $folder );
 		$processed = 0;
 		$saved     = 0;
 		foreach ( $ids as $id ) {
@@ -353,7 +443,7 @@ class VIO_Bulk {
 		wp_send_json_success( array(
 			'processed'   => $processed,
 			'batch_saved' => $saved,
-			'remaining'   => self::count_pending(),
+			'remaining'   => self::count_pending( $folder ),
 			'done'        => self::count_done(),
 			'total_saved' => self::total_saved(),
 		) );
@@ -363,13 +453,6 @@ class VIO_Bulk {
 /* ------------------------------------------------ WP-CLI */
 if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	class VIO_Bulk_CLI {
-		/**
-		 * Tối ưu ảnh cũ trong thư viện (nén giữ đuôi).
-		 *
-		 * [--resize]  : resize bản gốc quá khổ về max-width + regenerate thumbnail
-		 * [--backup]  : giữ backup bản gốc (uploads/vig-imgopt-backup)
-		 * [--batch=<n>] : số ảnh mỗi lô (mặc định 10)
-		 */
 		/**
 		 * Chạy thử trên BẢN SAO của vài ảnh thật + đo lệch màu. Không đụng ảnh gốc.
 		 * Nên chạy TRƯỚC khi tối ưu hàng loạt.
@@ -398,19 +481,57 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			\WP_CLI::success( 'An toàn: màu sắc được giữ nguyên. Có thể chạy `wp vig-imgopt bulk`.' );
 		}
 
+		/**
+		 * Tối ưu ảnh cũ trong thư viện (nén giữ đuôi).
+		 *
+		 * [--resize]  : resize bản gốc quá khổ về max-width + regenerate thumbnail
+		 * [--backup]  : giữ backup bản gốc (uploads/vig-imgopt-backup)
+		 * [--batch=<n>] : số ảnh mỗi lô (mặc định 10)
+		 * [--folder=<YYYY/MM>] : CHỈ tối ưu 1 thư mục media (vd --folder=2025/03)
+		 * [--id=<n>]  : CHỈ tối ưu đúng 1 ảnh theo ID (để chạy thử)
+		 * [--force]   : chạy lại cả ảnh đã tối ưu (chỉ dùng với --id)
+		 */
 		public function bulk( $args, $assoc ) {
 			$resize = isset( $assoc['resize'] );
 			$backup = isset( $assoc['backup'] );
 			$batch  = max( 1, (int) ( $assoc['batch'] ?? 10 ) );
-			$total  = VIO_Bulk::count_pending();
-			if ( 0 === $total ) {
-				\WP_CLI::success( 'Không có ảnh nào cần tối ưu.' );
+
+			// --- chạy thử đúng 1 ảnh ---
+			$one = (int) ( $assoc['id'] ?? 0 );
+			if ( $one > 0 ) {
+				$r = VIO_Bulk::optimize_one( $one, $resize, $backup, isset( $assoc['force'] ) );
+				if ( ! empty( $r['error'] ) ) {
+					\WP_CLI::error( $r['error'] );
+				}
+				if ( ! empty( $r['skipped'] ) ) {
+					\WP_CLI::warning( 'Ảnh này đã tối ưu rồi (dùng --force để chạy lại).' );
+					return;
+				}
+				\WP_CLI::success( sprintf(
+					'%s: %s → %s (-%d%%), %d file (gốc + thumbnail).',
+					$r['file'], size_format( $r['before'] ), size_format( $r['after'] ),
+					$r['before'] ? round( ( 1 - $r['after'] / $r['before'] ) * 100 ) : 0,
+					(int) ( $r['files'] ?? 1 )
+				) );
 				return;
 			}
-			\WP_CLI::log( "Cần tối ưu: {$total} ảnh." );
+
+			// --- lọc theo thư mục ---
+			$folder = VIO_Bulk::clean_folder( (string) ( $assoc['folder'] ?? '' ) );
+			if ( ! empty( $assoc['folder'] ) && '' === $folder ) {
+				\WP_CLI::error( 'Thư mục phải có dạng YYYY/MM, ví dụ --folder=2025/03' );
+			}
+			$scope = $folder ? "thư mục {$folder}" : 'toàn bộ thư viện';
+
+			$total = VIO_Bulk::count_pending( $folder );
+			if ( 0 === $total ) {
+				\WP_CLI::success( "Không có ảnh nào cần tối ưu trong {$scope}." );
+				return;
+			}
+			\WP_CLI::log( "Cần tối ưu ({$scope}): {$total} ảnh." );
 			$bar   = \WP_CLI\Utils\make_progress_bar( 'Đang tối ưu', $total );
 			$saved = 0;
-			while ( $ids = VIO_Bulk::get_batch( $batch ) ) {
+			while ( $ids = VIO_Bulk::get_batch( $batch, $folder ) ) {
 				foreach ( $ids as $id ) {
 					$r      = VIO_Bulk::optimize_attachment( $id, $resize, $backup );
 					$saved += (int) ( $r['saved'] ?? 0 );
@@ -419,6 +540,22 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			}
 			$bar->finish();
 			\WP_CLI::success( 'Xong. Tiết kiệm phiên này: ' . size_format( $saved ) . '. Tổng đã tối ưu: ' . VIO_Bulk::count_done() . ' ảnh.' );
+		}
+
+		/**
+		 * Liệt kê thư mục năm/tháng trong Media + số ảnh chưa tối ưu.
+		 */
+		public function folders( $args, $assoc ) {
+			$rows = VIO_Bulk::folders();
+			if ( ! $rows ) {
+				\WP_CLI::warning( 'Không tìm thấy thư mục dạng YYYY/MM nào.' );
+				return;
+			}
+			$out = array();
+			foreach ( $rows as $f => $d ) {
+				$out[] = array( 'folder' => $f, 'tong_anh' => $d['total'], 'chua_toi_uu' => $d['pending'] );
+			}
+			\WP_CLI\Utils\format_items( 'table', $out, array( 'folder', 'tong_anh', 'chua_toi_uu' ) );
 		}
 	}
 }
