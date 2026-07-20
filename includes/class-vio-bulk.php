@@ -202,7 +202,12 @@ class VIO_Bulk {
 
 		$after = self::sum_size( array_keys( $files ) );
 		$saved = max( 0, $before - $after );
-		update_post_meta( $id, self::META, array( 'at' => time(), 'saved' => $saved ) );
+		// 'size' = dung lượng file gốc sau khi tối ưu → dùng để phát hiện ảnh bị thay/restore về sau.
+		update_post_meta( $id, self::META, array(
+			'at'    => time(),
+			'saved' => $saved,
+			'size'  => (int) @filesize( $file ),
+		) );
 		return array( 'ok' => true, 'saved' => $saved, 'files' => count( $files ) );
 	}
 
@@ -314,6 +319,72 @@ class VIO_Bulk {
 		);
 	}
 
+	/* ------------------------------------------------ RESET / QUÉT LẠI (sau khi restore media) */
+
+	/** Attachment ảnh đã được đánh dấu tối ưu (tuỳ chọn lọc theo thư mục). */
+	private static function marked_ids( string $folder = '' ): array {
+		$meta = array( array( 'key' => self::META, 'compare' => 'EXISTS' ) );
+		$folder = self::clean_folder( $folder );
+		if ( '' !== $folder ) {
+			$meta[] = array(
+				'key'     => '_wp_attached_file',
+				'value'   => '^' . preg_quote( $folder, '/' ) . '/',
+				'compare' => 'REGEXP',
+			);
+		}
+		return array_map( 'intval', get_posts( array(
+			'post_type'      => 'attachment',
+			'post_status'    => 'inherit',
+			'post_mime_type' => array( 'image/jpeg', 'image/png', 'image/webp' ),
+			'posts_per_page' => -1,
+			'fields'         => 'ids',
+			'meta_query'     => $meta,
+		) ) );
+	}
+
+	/**
+	 * XOÁ dấu "đã tối ưu" → ảnh sẽ được xử lý lại từ đầu.
+	 * Dùng sau khi RESTORE media: file đã về bản gốc nhưng dấu vẫn còn trong postmeta.
+	 * @return int số ảnh được đặt lại
+	 */
+	public static function reset_marks( string $folder = '' ): int {
+		$ids = self::marked_ids( $folder );
+		foreach ( $ids as $id ) {
+			delete_post_meta( $id, self::META );
+		}
+		return count( $ids );
+	}
+
+	/**
+	 * Quét lại: so dung lượng file hiện tại với dung lượng đã ghi lúc tối ưu.
+	 * Khác nhau ⇒ file đã bị thay (restore / upload đè / regenerate) ⇒ bỏ dấu để tối ưu lại.
+	 * @return array{cleared:int,unchanged:int,unknown:int,missing:int}
+	 */
+	public static function rescan( string $folder = '' ): array {
+		$r = array( 'cleared' => 0, 'unchanged' => 0, 'unknown' => 0, 'missing' => 0 );
+		foreach ( self::marked_ids( $folder ) as $id ) {
+			$mark = get_post_meta( $id, self::META, true );
+			$file = get_attached_file( $id );
+
+			if ( ! $file || ! file_exists( $file ) ) {
+				$r['missing']++;
+				continue;
+			}
+			// Dấu cũ (trước v1.9.0) không lưu 'size' → không so được, phải dùng "Đặt lại" thủ công.
+			if ( ! is_array( $mark ) || ! isset( $mark['size'] ) ) {
+				$r['unknown']++;
+				continue;
+			}
+			if ( (int) $mark['size'] !== (int) filesize( $file ) ) {
+				delete_post_meta( $id, self::META );
+				$r['cleared']++;
+			} else {
+				$r['unchanged']++;
+			}
+		}
+		return $r;
+	}
+
 	/* ------------------------------------------------ TỰ KIỂM TRA (an toàn: chỉ chạy trên BẢN SAO) */
 
 	/**
@@ -402,6 +473,36 @@ class VIO_Bulk {
 			wp_send_json_error( array( 'message' => 'Không đủ quyền.' ), 403 );
 		}
 		@set_time_limit( 0 );
+
+		// Đặt lại / quét lại sau khi restore media
+		$op = sanitize_key( (string) ( $_POST['op'] ?? '' ) );
+		if ( 'reset' === $op || 'rescan' === $op ) {
+			$fo_raw = (string) ( $_POST['folder'] ?? '' );
+			$fo     = self::clean_folder( $fo_raw );
+			if ( '' !== $fo_raw && '' === $fo ) {
+				wp_send_json_error( array( 'message' => 'Thư mục không hợp lệ (phải dạng YYYY/MM).' ), 400 );
+			}
+			if ( 'reset' === $op ) {
+				$n = self::reset_marks( $fo );
+				wp_send_json_success( array(
+					'op'      => 'reset',
+					'message' => sprintf( 'Đã đặt lại %d ảnh%s — sẽ được tối ưu lại từ đầu.', $n, $fo ? " trong {$fo}" : '' ),
+					'pending' => self::count_pending(),
+				) );
+			}
+			$r = self::rescan( $fo );
+			wp_send_json_success( array(
+				'op'      => 'rescan',
+				'message' => sprintf(
+					'Quét xong: %d ảnh đã bị thay file → đặt lại để tối ưu lại · %d còn nguyên · %d không rõ (dấu cũ) · %d mất file.',
+					$r['cleared'], $r['unchanged'], $r['unknown'], $r['missing']
+				),
+				'cleared' => $r['cleared'],
+				'unknown' => $r['unknown'],
+				'pending' => self::count_pending(),
+			) );
+		}
+
 		$resize = ! empty( $_POST['resize'] );
 		$backup = ! empty( $_POST['backup'] );
 		$batch  = max( 1, min( 20, (int) ( $_POST['batch'] ?? 5 ) ) );
@@ -540,6 +641,46 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			}
 			$bar->finish();
 			\WP_CLI::success( 'Xong. Tiết kiệm phiên này: ' . size_format( $saved ) . '. Tổng đã tối ưu: ' . VIO_Bulk::count_done() . ' ảnh.' );
+		}
+
+		/**
+		 * XOÁ dấu "đã tối ưu" để plugin xử lý lại từ đầu.
+		 * Dùng SAU KHI RESTORE media — file đã về bản gốc nhưng dấu vẫn nằm trong postmeta.
+		 *
+		 * [--folder=<YYYY/MM>] : chỉ đặt lại 1 thư mục
+		 * [--yes] : không hỏi xác nhận
+		 */
+		public function reset( $args, $assoc ) {
+			$folder = VIO_Bulk::clean_folder( (string) ( $assoc['folder'] ?? '' ) );
+			if ( ! empty( $assoc['folder'] ) && '' === $folder ) {
+				\WP_CLI::error( 'Thư mục phải có dạng YYYY/MM.' );
+			}
+			$scope = $folder ? "thư mục {$folder}" : 'TOÀN BỘ thư viện';
+			\WP_CLI::confirm( "Đặt lại dấu 'đã tối ưu' cho {$scope}?", $assoc );
+			$n = VIO_Bulk::reset_marks( $folder );
+			\WP_CLI::success( "Đã đặt lại {$n} ảnh. Chạy `wp vig-imgopt bulk` để tối ưu lại." );
+		}
+
+		/**
+		 * Quét lại: ảnh nào có file khác với lúc tối ưu (đã restore/thay) thì bỏ dấu.
+		 * An toàn hơn `reset` vì chỉ đụng ảnh thực sự đã đổi.
+		 *
+		 * [--folder=<YYYY/MM>] : chỉ quét 1 thư mục
+		 */
+		public function rescan( $args, $assoc ) {
+			$folder = VIO_Bulk::clean_folder( (string) ( $assoc['folder'] ?? '' ) );
+			if ( ! empty( $assoc['folder'] ) && '' === $folder ) {
+				\WP_CLI::error( 'Thư mục phải có dạng YYYY/MM.' );
+			}
+			$r = VIO_Bulk::rescan( $folder );
+			\WP_CLI::log( "Đã bị thay file (đặt lại): {$r['cleared']}" );
+			\WP_CLI::log( "Còn nguyên:               {$r['unchanged']}" );
+			\WP_CLI::log( "Không rõ (dấu cũ):        {$r['unknown']}" );
+			\WP_CLI::log( "Mất file:                 {$r['missing']}" );
+			if ( $r['unknown'] ) {
+				\WP_CLI::warning( "{$r['unknown']} ảnh mang dấu từ bản cũ (không lưu dung lượng) nên không so được — dùng `wp vig-imgopt reset` nếu vừa restore." );
+			}
+			\WP_CLI::success( 'Xong. Còn ' . VIO_Bulk::count_pending() . ' ảnh cần tối ưu.' );
 		}
 
 		/**
