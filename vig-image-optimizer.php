@@ -3,7 +3,7 @@
  * Plugin Name: VIG Image Optimizer
  * Plugin URI:  https://vigdigital.com
  * Description: Automatically optimizes images the moment they are uploaded to the Media Library — scales down to a maximum width (default 2000px, height preserved), compresses or converts to WebP, strips metadata, and can block oversized uploads. Existing images are never touched. Built by VIG Digital.
- * Version:     1.9.1
+ * Version:     1.9.2
  * Author:      VIG Digital
  * Author URI:  https://vigdigital.com
  * License:     GPL-2.0-or-later
@@ -283,6 +283,9 @@ class VIG_Image_Optimizer {
 
             $im->writeImage($file);
             $im->clear();
+            // Imagick ghi file NGOÀI tầm PHP → stat cache của filesize() còn giữ số CŨ.
+            // Không xoá thì mọi phép đo dung lượng sau đó đều sai.
+            clearstatcache(true, $file);
             return true;
         } catch (\Throwable $e) {
             return false;
@@ -310,8 +313,13 @@ class VIG_Image_Optimizer {
 
     private static function strip_meta_imagick($file) {
         if (!extension_loaded('imagick')) return;
-        try { $im = new Imagick($file); self::strip_keep_icc($im); $im->writeImage($file); $im->clear(); }
-        catch (\Throwable $e) {}
+        try {
+            $im = new Imagick($file);
+            self::strip_keep_icc($im);
+            $im->writeImage($file);
+            $im->clear();
+            clearstatcache(true, $file);   // xem ghi chú ở png_quantize_imagick()
+        } catch (\Throwable $e) {}
     }
 
     /**

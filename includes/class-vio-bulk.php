@@ -97,6 +97,9 @@ class VIO_Bulk {
 		$file   = get_attached_file( $id );
 		$before = $file && file_exists( $file ) ? (int) filesize( $file ) : 0;
 		$r      = self::optimize_attachment( $id, $resize, $backup );
+		if ( $file ) {
+			clearstatcache( true, $file );
+		}
 		$r['file']   = $file ? basename( $file ) : '';
 		$r['before'] = $before;
 		$r['after']  = $file && file_exists( $file ) ? (int) filesize( $file ) : 0;
@@ -203,6 +206,8 @@ class VIO_Bulk {
 		$after = self::sum_size( array_keys( $files ) );
 		$saved = max( 0, $before - $after );
 		// 'size' = dung lượng file gốc sau khi tối ưu → dùng để phát hiện ảnh bị thay/restore về sau.
+		// clearstatcache bắt buộc: lấy nhầm size CŨ thì rescan sau này sẽ tưởng file đã bị thay.
+		clearstatcache( true, $file );
 		update_post_meta( $id, self::META, array(
 			'at'    => time(),
 			'saved' => $saved,
@@ -230,6 +235,7 @@ class VIO_Bulk {
 	private static function sum_size( array $paths ): int {
 		$n = 0;
 		foreach ( $paths as $p ) {
+			clearstatcache( true, $p );   // Imagick ghi file ngoài PHP → filesize() dễ trả số cũ
 			$n += (int) @filesize( $p );
 		}
 		return $n;
@@ -420,6 +426,7 @@ class VIO_Bulk {
 			VIG_Image_Optimizer::optimize( $tmp, $type, true, false );   // giữ đuôi, không resize
 
 			$after_px = self::sample_pixels( $tmp );
+			clearstatcache( true, $tmp );
 			$after_sz = (int) @filesize( $tmp );
 			@unlink( $tmp );
 
