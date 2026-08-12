@@ -3,7 +3,7 @@
  * Plugin Name: VIG Image Optimizer
  * Plugin URI:  https://vigdigital.com
  * Description: Automatically optimizes images the moment they are uploaded to the Media Library — scales down to a maximum width (default 2000px, height preserved), compresses or converts to WebP, strips metadata, and can block oversized uploads. Existing images are never touched. Built by VIG Digital.
- * Version:     1.9.2
+ * Version:     1.9.3
  * Author:      VIG Digital
  * Author URI:  https://vigdigital.com
  * License:     GPL-2.0-or-later
@@ -121,6 +121,27 @@ class VIG_Image_Optimizer {
     }
 
     /**
+     * Đổi đuôi file NHƯNG đảm bảo không đè file trùng tên (như WP: abc.webp → abc-1.webp).
+     * WP `wp_unique_filename` chỉ chống trùng theo đuôi ĐANG upload (.png); khi ta đổi sang
+     * .webp/.jpg thì phải tự chống trùng cho đuôi mới, kẻo đè mất ảnh cũ đã convert trước đó.
+     */
+    private static function unique_target($file, $ext) {
+        $dir  = dirname($file);
+        $base = preg_replace('/\.[^.\/]+$/', '', wp_basename($file)) . '.' . $ext;
+        if (function_exists('wp_unique_filename')) {
+            $base = wp_unique_filename($dir, $base);
+        } else {
+            // fallback thô nếu WP core chưa nạp
+            $name = preg_replace('/\.[^.\/]+$/', '', $base);
+            $i    = 1;
+            while (file_exists(trailingslashit($dir) . $base)) {
+                $base = $name . '-' . $i++ . '.' . $ext;
+            }
+        }
+        return trailingslashit($dir) . $base;
+    }
+
+    /**
      * Tối ưu 1 file tại chỗ. Trả về path kết quả (có thể đổi đuôi), hoặc false nếu bỏ qua/lỗi.
      * @param bool $keep_ext true = KHÔNG đổi đuôi (bỏ WebP + PNG→JPEG) — dùng cho ảnh CŨ để không phá tham chiếu.
      */
@@ -138,10 +159,10 @@ class VIG_Image_Optimizer {
                     $editor->resize($max, PHP_INT_MAX, false);   // CHỈ cap chiều ngang
                 }
                 $editor->set_quality((int) $o['jpeg_quality']);
-                // nguồn đã .webp → ghi ra tạm; ảnh khác → đổi đuôi .webp
+                // nguồn đã .webp → ghi ra tạm; ảnh khác → đổi đuôi .webp (đảm bảo KHÔNG đè file trùng tên)
                 $target = ($type === 'image/webp')
                     ? $file . '-viotmp.webp'
-                    : preg_replace('/\.[^.\/]+$/', '', $file) . '.webp';
+                    : self::unique_target($file, 'webp');
                 $saved = $editor->save($target, 'image/webp');
                 if (!is_wp_error($saved) && !empty($saved['path'])) {
                     if ((int) @filesize($saved['path']) < $orig) {   // WebP nhỏ hơn → chốt
@@ -174,8 +195,7 @@ class VIG_Image_Optimizer {
 
         // PNG → JPEG (chỉ khi chắc chắn KHÔNG trong suốt) — CHỈ giữ nếu nhỏ hơn thật
         if (!$keep_ext && $type === 'image/png' && $o['png_mode'] === 'to_jpeg' && !self::png_has_alpha($file)) {
-            $new   = preg_replace('/\.png$/i', '.jpg', $file);
-            if ($new === $file) $new .= '.jpg';
+            $new   = self::unique_target($file, 'jpg');   // KHÔNG đè abc.jpg có sẵn
             $saved = $editor->save($new, 'image/jpeg');
             if (!is_wp_error($saved) && !empty($saved['path'])) {
                 if ((int) @filesize($saved['path']) < $orig) {   // JPEG nhỏ hơn → chốt
