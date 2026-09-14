@@ -22,7 +22,7 @@ Mỗi lần bạn tải ảnh lên Thư viện Media, plugin tự: thu ảnh v�
 
 ## Cài đặt
 
-1. Tải `vig-pix-optimizer.zip` từ [Releases](../../releases) → Plugins → Add New → Upload → Activate.
+1. Tải `vig-image-optimizer.zip` từ [Releases](../../releases) → Plugins → Add New → Upload → Activate.
 2. Vào **VIG Toolkit → Pix Optimizer**, chỉnh thông số (hoặc để mặc định) → Lưu.
 3. Xong — cứ upload ảnh như bình thường, plugin lo phần còn lại.
 

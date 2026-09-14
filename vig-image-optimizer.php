@@ -7,8 +7,8 @@
  * Author:      VIG Digital
  * Author URI:  https://vigdigital.com
  * License:     GPL-2.0-or-later
- * Text Domain: vig-pix-optimizer
- * Update URI:  https://github.com/vigdigital/vig-pix-optimizer
+ * Text Domain: vig-image-optimizer
+ * Update URI:  https://github.com/vigdigital/vig-image-optimizer
  *
  * Ghi chú kỹ thuật (xem knowledge/wp-skills/WP Image Optimization):
  * - CHỈ hạ CHIỀU NGANG (width) về max, KHÔNG cắt chiều cao (khác `sips -Z`/longest-side).
@@ -19,16 +19,16 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('VIG_PIXOPT_PATH', plugin_dir_path(__FILE__));
+define('VIG_IMGOPT_PATH', plugin_dir_path(__FILE__));
 
-require_once VIG_PIXOPT_PATH . 'includes/vig-admin-menu.php';
-require_once VIG_PIXOPT_PATH . 'includes/class-vpo-c2pa.php';   // xoá dấu vết AI (C2PA)
+require_once VIG_IMGOPT_PATH . 'includes/vig-admin-menu.php';
+require_once VIG_IMGOPT_PATH . 'includes/class-vio-c2pa.php';   // xoá dấu vết AI (C2PA)
 
 // Tự-update qua GitHub Releases (repo public → không cần token).
-require_once VIG_PIXOPT_PATH . 'includes/vig-update-checker.php';
-vig_setup_updates( __FILE__, 'vig-pix-optimizer', 'vigdigital', true );
+require_once VIG_IMGOPT_PATH . 'includes/vig-update-checker.php';
+vig_setup_updates( __FILE__, 'vig-image-optimizer', 'vigdigital', true );
 
-class VIG_Pix_Optimizer {
+class VIG_Image_Optimizer {
 
     const OPT = 'vig_imgopt_settings';
 
@@ -65,10 +65,10 @@ class VIG_Pix_Optimizer {
         add_action('admin_notices', [__CLASS__, 'saved_notice']);
 
         // Tối ưu ảnh CŨ (bulk).
-        require_once VIG_PIXOPT_PATH . 'includes/class-vpo-bulk.php';
-        VPO_Bulk::register();
+        require_once VIG_IMGOPT_PATH . 'includes/class-vio-bulk.php';
+        VIO_Bulk::register();
         if (defined('WP_CLI') && WP_CLI) {
-            WP_CLI::add_command('vig-imgopt', 'VPO_Bulk_CLI');
+            WP_CLI::add_command('vig-imgopt', 'VIO_Bulk_CLI');
         }
     }
 
@@ -111,7 +111,7 @@ class VIG_Pix_Optimizer {
             $file = $newfile;
         }
 
-        if (!empty(self::opts()['strip_ai'])) VPO_C2PA::strip($file);   // xoá dấu vết AI (C2PA)
+        if (!empty(self::opts()['strip_ai'])) VIO_C2PA::strip($file);   // xoá dấu vết AI (C2PA)
 
         if ($before) {
             $after = @filesize($file);
@@ -381,9 +381,9 @@ class VIG_Pix_Optimizer {
 
     /* ================= TỐI ƯU ẢNH CŨ (BULK) ================= */
     public static function render_bulk_box() {
-        $pending = VPO_Bulk::count_pending();
-        $done    = VPO_Bulk::count_done();
-        $saved   = VPO_Bulk::total_saved();
+        $pending = VIO_Bulk::count_pending();
+        $done    = VIO_Bulk::count_done();
+        $saved   = VIO_Bulk::total_saved();
         $nonce   = wp_create_nonce('vig_imgopt_bulk');
         ?>
         <div style="background:#fff;border:1px solid #dcdcde;border-radius:6px;padding:16px 20px;margin-top:14px;max-width:820px">
@@ -394,9 +394,9 @@ class VIG_Pix_Optimizer {
             <p><strong>Chưa tối ưu:</strong> <span id="vio-pending"><?php echo (int) $pending; ?></span> ảnh
                &nbsp;·&nbsp; <strong>Đã tối ưu:</strong> <span id="vio-done"><?php echo (int) $done; ?></span>
                &nbsp;·&nbsp; <strong>Đã tiết kiệm:</strong> <span id="vio-saved"><?php echo esc_html(size_format($saved)); ?></span>
-               <?php $cf = VPO_Bulk::current_folder(); if ($cf): ?>&nbsp;·&nbsp; <strong>Đang tới thư mục:</strong> <code><?php echo esc_html($cf); ?></code><?php endif; ?></p>
+               <?php $cf = VIO_Bulk::current_folder(); if ($cf): ?>&nbsp;·&nbsp; <strong>Đang tới thư mục:</strong> <code><?php echo esc_html($cf); ?></code><?php endif; ?></p>
 
-            <?php $cs = VPO_Bulk::cron_status(); if ($cs['enabled']): ?>
+            <?php $cs = VIO_Bulk::cron_status(); if ($cs['enabled']): ?>
                 <p style="padding:8px 12px;border-left:4px solid #2271b1;background:#eef4fb">
                     ⏱ <strong>Lịch nền: BẬT</strong>
                     <?php echo $cs['next'] ? ' · lần tới ' . esc_html(get_date_from_gmt(gmdate('Y-m-d H:i:s', $cs['next']), 'H:i d/m')) : ''; ?>
@@ -412,7 +412,7 @@ class VIG_Pix_Optimizer {
                 <label><input type="checkbox" id="vio-backup"> Giữ backup bản gốc (có thể hoàn tác — tốn thêm dung lượng)</label>
             </p>
 
-            <?php $folders = VPO_Bulk::folders(); ?>
+            <?php $folders = VIO_Bulk::folders(); ?>
             <table class="form-table" style="margin-top:4px">
                 <tr>
                     <th scope="row" style="width:170px;padding-left:0">Phạm vi</th>
@@ -539,7 +539,7 @@ class VIG_Pix_Optimizer {
             'VIG Pix Optimizer',                  // page title
             'Pix Optimizer',                      // menu label
             'manage_options',
-            'vig-pix-optimizer',                  // slug settings của plugin
+            'vig-image-optimizer',                  // slug settings của plugin
             [__CLASS__, 'page']
         );
     }
@@ -588,7 +588,7 @@ class VIG_Pix_Optimizer {
     public static function page() {
         $o   = self::opts();
         $tab = (isset($_GET['tab']) && 'upload' === $_GET['tab']) ? 'upload' : 'old';
-        $url = admin_url('admin.php?page=vig-pix-optimizer');
+        $url = admin_url('admin.php?page=vig-image-optimizer');
         ?>
         <div class="wrap">
             <h1>VIG Pix Optimizer</h1>
@@ -815,7 +815,7 @@ class VIG_Pix_Optimizer {
     }
 }
 
-add_action('plugins_loaded', ['VIG_Pix_Optimizer', 'init']);
+add_action('plugins_loaded', ['VIG_Image_Optimizer', 'init']);
 
 // Gỡ lịch nền khi tắt plugin.
 register_deactivation_hook(__FILE__, function () {

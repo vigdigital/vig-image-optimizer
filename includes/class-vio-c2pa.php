@@ -2,7 +2,7 @@
 defined('ABSPATH') || exit;
 
 /**
- * VPO_C2PA — xoá dấu vết AI (C2PA / Content Credentials) + XMP provenance khỏi ảnh.
+ * VIO_C2PA — xoá dấu vết AI (C2PA / Content Credentials) + XMP provenance khỏi ảnh.
  *
  * Xử lý NHỊ PHÂN trực tiếp (không cần Imagick) — như PixClean nhưng bằng PHP:
  *   - JPEG : bỏ segment APP11 (0xFFEB, chứa JUMBF/C2PA) + APP1 (0xFFE1) nếu là XMP.
@@ -11,7 +11,7 @@ defined('ABSPATH') || exit;
  *
  * CHỈ đụng phần dấu vết AI/XMP — KHÔNG đụng pixel, ICC, EXIF (strip_meta lo EXIF riêng).
  */
-class VPO_C2PA {
+class VIO_C2PA {
 
 	/** Xoá dấu vết AI khỏi 1 file. Trả về true nếu có thay đổi & đã ghi lại. */
 	public static function strip( $file ) {
