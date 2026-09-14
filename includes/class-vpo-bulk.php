@@ -1,6 +1,6 @@
 <?php
 /**
- * VIO_Bulk — tối ưu ảnh CŨ (đã có trong thư viện) theo lô.
+ * VPO_Bulk — tối ưu ảnh CŨ (đã có trong thư viện) theo lô.
  * Nén tại chỗ, GIỮ NGUYÊN đuôi + tên file → không phá tham chiếu trong bài viết.
  * Xử lý bản gốc + tất cả thumbnail. Đánh dấu _vig_imgopt_done để chạy lại bỏ qua.
  */
@@ -9,7 +9,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-class VIO_Bulk {
+class VPO_Bulk {
 
 	const META     = '_vig_imgopt_done';
 	const CRON     = 'vig_imgopt_cron';
@@ -182,10 +182,10 @@ class VIO_Bulk {
 			$editor = wp_get_image_editor( $file );
 			if ( ! is_wp_error( $editor ) ) {
 				$sz  = $editor->get_size();
-				$max = (int) VIG_Image_Optimizer::opts()['max_width'];
+				$max = (int) VIG_Pix_Optimizer::opts()['max_width'];
 				if ( ! empty( $sz['width'] ) && $sz['width'] > $max ) {
 					$editor->resize( $max, PHP_INT_MAX, false );
-					$editor->set_quality( (int) VIG_Image_Optimizer::opts()['jpeg_quality'] );
+					$editor->set_quality( (int) VIG_Pix_Optimizer::opts()['jpeg_quality'] );
 					$editor->save( $file, $type ); // ghi đè bản gốc, GIỮ tên
 					require_once ABSPATH . 'wp-admin/includes/image.php';
 					$newmeta = wp_generate_attachment_metadata( $id, $file );
@@ -199,8 +199,10 @@ class VIO_Bulk {
 		}
 
 		// Nén từng file tại chỗ, GIỮ đuôi + GIỮ kích thước (resize đã xử lý riêng ở tầng 2 → metadata luôn khớp).
+		$strip_ai = ! empty( VIG_Pix_Optimizer::opts()['strip_ai'] );
 		foreach ( $files as $p => $t ) {
-			VIG_Image_Optimizer::optimize( $p, $t ?: ( wp_check_filetype( $p )['type'] ?: 'image/jpeg' ), true, false );
+			VIG_Pix_Optimizer::optimize( $p, $t ?: ( wp_check_filetype( $p )['type'] ?: 'image/jpeg' ), true, false );
+			if ( $strip_ai && class_exists( 'VPO_C2PA' ) ) { VPO_C2PA::strip( $p ); }
 		}
 
 		$after = self::sum_size( array_keys( $files ) );
@@ -266,7 +268,7 @@ class VIO_Bulk {
 
 	/** Đặt/gỡ lịch theo cài đặt. Gọi ở init (idempotent) + khi lưu settings. */
 	public static function reconcile_cron(): void {
-		$o        = VIG_Image_Optimizer::opts();
+		$o        = VIG_Pix_Optimizer::opts();
 		$enabled  = ! empty( $o['bulk_cron'] );
 		$interval = in_array( $o['bulk_cron_interval'] ?? 'hourly', array( 'hourly', 'twicedaily', 'daily' ), true ) ? $o['bulk_cron_interval'] : 'hourly';
 		$ts       = wp_next_scheduled( self::CRON );
@@ -288,7 +290,7 @@ class VIO_Bulk {
 
 	/** Chạy 1 lô mỗi lần cron fire (cũ → mới). */
 	public static function cron_run(): void {
-		$o = VIG_Image_Optimizer::opts();
+		$o = VIG_Pix_Optimizer::opts();
 		if ( empty( $o['bulk_cron'] ) ) {
 			return;
 		}
@@ -317,7 +319,7 @@ class VIO_Bulk {
 
 	public static function cron_status(): array {
 		return array(
-			'enabled'   => (bool) ( VIG_Image_Optimizer::opts()['bulk_cron'] ?? false ),
+			'enabled'   => (bool) ( VIG_Pix_Optimizer::opts()['bulk_cron'] ?? false ),
 			'next'      => wp_next_scheduled( self::CRON ),
 			'folder'    => self::current_folder(),
 			'remaining' => self::count_pending(),
@@ -423,7 +425,7 @@ class VIO_Bulk {
 			$before_px = self::sample_pixels( $tmp );
 			$before_sz = (int) @filesize( $tmp );
 
-			VIG_Image_Optimizer::optimize( $tmp, $type, true, false );   // giữ đuôi, không resize
+			VIG_Pix_Optimizer::optimize( $tmp, $type, true, false );   // giữ đuôi, không resize
 
 			$after_px = self::sample_pixels( $tmp );
 			clearstatcache( true, $tmp );
@@ -581,7 +583,7 @@ class VIO_Bulk {
 
 /* ------------------------------------------------ WP-CLI */
 if ( defined( 'WP_CLI' ) && WP_CLI ) {
-	class VIO_Bulk_CLI {
+	class VPO_Bulk_CLI {
 		/**
 		 * Chạy thử trên BẢN SAO của vài ảnh thật + đo lệch màu. Không đụng ảnh gốc.
 		 * Nên chạy TRƯỚC khi tối ưu hàng loạt.
@@ -589,7 +591,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 * [--n=<số>] : số ảnh lấy mẫu (mặc định 5)
 		 */
 		public function selftest( $args, $assoc ) {
-			$rows = VIO_Bulk::selftest( max( 1, (int) ( $assoc['n'] ?? 5 ) ) );
+			$rows = VPO_Bulk::selftest( max( 1, (int) ( $assoc['n'] ?? 5 ) ) );
 			if ( ! $rows ) {
 				\WP_CLI::warning( 'Không có ảnh nào để kiểm tra.' );
 				return;
@@ -629,7 +631,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			// --- chạy thử đúng 1 ảnh ---
 			$one = (int) ( $assoc['id'] ?? 0 );
 			if ( $one > 0 ) {
-				$r = VIO_Bulk::optimize_one( $one, $resize, $backup, isset( $assoc['force'] ) );
+				$r = VPO_Bulk::optimize_one( $one, $resize, $backup, isset( $assoc['force'] ) );
 				if ( ! empty( $r['error'] ) ) {
 					\WP_CLI::error( $r['error'] );
 				}
@@ -647,13 +649,13 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			}
 
 			// --- lọc theo thư mục ---
-			$folder = VIO_Bulk::clean_folder( (string) ( $assoc['folder'] ?? '' ) );
+			$folder = VPO_Bulk::clean_folder( (string) ( $assoc['folder'] ?? '' ) );
 			if ( ! empty( $assoc['folder'] ) && '' === $folder ) {
 				\WP_CLI::error( 'Thư mục phải có dạng YYYY/MM, ví dụ --folder=2025/03' );
 			}
 			$scope = $folder ? "thư mục {$folder}" : 'toàn bộ thư viện';
 
-			$total = VIO_Bulk::count_pending( $folder );
+			$total = VPO_Bulk::count_pending( $folder );
 			if ( 0 === $total ) {
 				\WP_CLI::success( "Không có ảnh nào cần tối ưu trong {$scope}." );
 				return;
@@ -661,15 +663,15 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			\WP_CLI::log( "Cần tối ưu ({$scope}): {$total} ảnh." );
 			$bar   = \WP_CLI\Utils\make_progress_bar( 'Đang tối ưu', $total );
 			$saved = 0;
-			while ( $ids = VIO_Bulk::get_batch( $batch, $folder ) ) {
+			while ( $ids = VPO_Bulk::get_batch( $batch, $folder ) ) {
 				foreach ( $ids as $id ) {
-					$r      = VIO_Bulk::optimize_attachment( $id, $resize, $backup );
+					$r      = VPO_Bulk::optimize_attachment( $id, $resize, $backup );
 					$saved += (int) ( $r['saved'] ?? 0 );
 					$bar->tick();
 				}
 			}
 			$bar->finish();
-			\WP_CLI::success( 'Xong. Tiết kiệm phiên này: ' . size_format( $saved ) . '. Tổng đã tối ưu: ' . VIO_Bulk::count_done() . ' ảnh.' );
+			\WP_CLI::success( 'Xong. Tiết kiệm phiên này: ' . size_format( $saved ) . '. Tổng đã tối ưu: ' . VPO_Bulk::count_done() . ' ảnh.' );
 		}
 
 		/**
@@ -680,13 +682,13 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 * [--yes] : không hỏi xác nhận
 		 */
 		public function reset( $args, $assoc ) {
-			$folder = VIO_Bulk::clean_folder( (string) ( $assoc['folder'] ?? '' ) );
+			$folder = VPO_Bulk::clean_folder( (string) ( $assoc['folder'] ?? '' ) );
 			if ( ! empty( $assoc['folder'] ) && '' === $folder ) {
 				\WP_CLI::error( 'Thư mục phải có dạng YYYY/MM.' );
 			}
 			$scope = $folder ? "thư mục {$folder}" : 'TOÀN BỘ thư viện';
 			\WP_CLI::confirm( "Đặt lại dấu 'đã tối ưu' cho {$scope}?", $assoc );
-			$n = VIO_Bulk::reset_marks( $folder );
+			$n = VPO_Bulk::reset_marks( $folder );
 			\WP_CLI::success( "Đã đặt lại {$n} ảnh. Chạy `wp vig-imgopt bulk` để tối ưu lại." );
 		}
 
@@ -697,11 +699,11 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 * [--folder=<YYYY/MM>] : chỉ quét 1 thư mục
 		 */
 		public function rescan( $args, $assoc ) {
-			$folder = VIO_Bulk::clean_folder( (string) ( $assoc['folder'] ?? '' ) );
+			$folder = VPO_Bulk::clean_folder( (string) ( $assoc['folder'] ?? '' ) );
 			if ( ! empty( $assoc['folder'] ) && '' === $folder ) {
 				\WP_CLI::error( 'Thư mục phải có dạng YYYY/MM.' );
 			}
-			$r = VIO_Bulk::rescan( $folder );
+			$r = VPO_Bulk::rescan( $folder );
 			\WP_CLI::log( "Đã bị thay file (đặt lại): {$r['cleared']}" );
 			\WP_CLI::log( "Còn nguyên:               {$r['unchanged']}" );
 			\WP_CLI::log( "Không rõ (dấu cũ):        {$r['unknown']}" );
@@ -709,14 +711,14 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			if ( $r['unknown'] ) {
 				\WP_CLI::warning( "{$r['unknown']} ảnh mang dấu từ bản cũ (không lưu dung lượng) nên không so được — dùng `wp vig-imgopt reset` nếu vừa restore." );
 			}
-			\WP_CLI::success( 'Xong. Còn ' . VIO_Bulk::count_pending() . ' ảnh cần tối ưu.' );
+			\WP_CLI::success( 'Xong. Còn ' . VPO_Bulk::count_pending() . ' ảnh cần tối ưu.' );
 		}
 
 		/**
 		 * Liệt kê thư mục năm/tháng trong Media + số ảnh chưa tối ưu.
 		 */
 		public function folders( $args, $assoc ) {
-			$rows = VIO_Bulk::folders();
+			$rows = VPO_Bulk::folders();
 			if ( ! $rows ) {
 				\WP_CLI::warning( 'Không tìm thấy thư mục dạng YYYY/MM nào.' );
 				return;

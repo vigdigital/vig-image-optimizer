@@ -1,14 +1,14 @@
 <?php
 /**
- * Plugin Name: VIG Image Optimizer
+ * Plugin Name: VIG Pix Optimizer
  * Plugin URI:  https://vigdigital.com
  * Description: Automatically optimizes images the moment they are uploaded to the Media Library — scales down to a maximum width (default 2000px, height preserved), compresses or converts to WebP, strips metadata, and can block oversized uploads. Existing images are never touched. Built by VIG Digital.
- * Version:     1.9.4
+ * Version:     2.0.0
  * Author:      VIG Digital
  * Author URI:  https://vigdigital.com
  * License:     GPL-2.0-or-later
- * Text Domain: vig-image-optimizer
- * Update URI:  https://github.com/vigdigital/vig-image-optimizer
+ * Text Domain: vig-pix-optimizer
+ * Update URI:  https://github.com/vigdigital/vig-pix-optimizer
  *
  * Ghi chú kỹ thuật (xem knowledge/wp-skills/WP Image Optimization):
  * - CHỈ hạ CHIỀU NGANG (width) về max, KHÔNG cắt chiều cao (khác `sips -Z`/longest-side).
@@ -19,15 +19,16 @@
 
 if (!defined('ABSPATH')) exit;
 
-define('VIG_IMGOPT_PATH', plugin_dir_path(__FILE__));
+define('VIG_PIXOPT_PATH', plugin_dir_path(__FILE__));
 
-require_once VIG_IMGOPT_PATH . 'includes/vig-admin-menu.php';
+require_once VIG_PIXOPT_PATH . 'includes/vig-admin-menu.php';
+require_once VIG_PIXOPT_PATH . 'includes/class-vpo-c2pa.php';   // xoá dấu vết AI (C2PA)
 
 // Tự-update qua GitHub Releases (repo public → không cần token).
-require_once VIG_IMGOPT_PATH . 'includes/vig-update-checker.php';
-vig_setup_updates( __FILE__, 'vig-image-optimizer', 'vigdigital', true );
+require_once VIG_PIXOPT_PATH . 'includes/vig-update-checker.php';
+vig_setup_updates( __FILE__, 'vig-pix-optimizer', 'vigdigital', true );
 
-class VIG_Image_Optimizer {
+class VIG_Pix_Optimizer {
 
     const OPT = 'vig_imgopt_settings';
 
@@ -37,6 +38,7 @@ class VIG_Image_Optimizer {
         'png_mode'      => 'quantize', // keep | quantize | to_jpeg
         'png_colors'    => 256,        // số màu khi quantize (lossy PNG, cần Imagick)
         'strip_meta'    => 1,
+        'strip_ai'      => 1,          // xoá dấu vết AI (C2PA/Content Credentials) + XMP provenance
         'block_over_mb' => 10,         // chặn upload ảnh nặng hơn ngưỡng này (MB); 0 = tắt
         'output_format' => 'webp',     // original | webp (mặc định WebP; tự fallback 'original' nếu host không hỗ trợ WebP)
         // Tối ưu ảnh CŨ theo lịch nền (từ cũ → mới theo thư mục năm/tháng)
@@ -63,10 +65,10 @@ class VIG_Image_Optimizer {
         add_action('admin_notices', [__CLASS__, 'saved_notice']);
 
         // Tối ưu ảnh CŨ (bulk).
-        require_once VIG_IMGOPT_PATH . 'includes/class-vio-bulk.php';
-        VIO_Bulk::register();
+        require_once VIG_PIXOPT_PATH . 'includes/class-vpo-bulk.php';
+        VPO_Bulk::register();
         if (defined('WP_CLI') && WP_CLI) {
-            WP_CLI::add_command('vig-imgopt', 'VIO_Bulk_CLI');
+            WP_CLI::add_command('vig-imgopt', 'VPO_Bulk_CLI');
         }
     }
 
@@ -108,6 +110,8 @@ class VIG_Image_Optimizer {
             $upload['type'] = $newtype['type'] ?: $upload['type'];
             $file = $newfile;
         }
+
+        if (!empty(self::opts()['strip_ai'])) VPO_C2PA::strip($file);   // xoá dấu vết AI (C2PA)
 
         if ($before) {
             $after = @filesize($file);
@@ -377,9 +381,9 @@ class VIG_Image_Optimizer {
 
     /* ================= TỐI ƯU ẢNH CŨ (BULK) ================= */
     public static function render_bulk_box() {
-        $pending = VIO_Bulk::count_pending();
-        $done    = VIO_Bulk::count_done();
-        $saved   = VIO_Bulk::total_saved();
+        $pending = VPO_Bulk::count_pending();
+        $done    = VPO_Bulk::count_done();
+        $saved   = VPO_Bulk::total_saved();
         $nonce   = wp_create_nonce('vig_imgopt_bulk');
         ?>
         <div style="background:#fff;border:1px solid #dcdcde;border-radius:6px;padding:16px 20px;margin-top:14px;max-width:820px">
@@ -390,9 +394,9 @@ class VIG_Image_Optimizer {
             <p><strong>Chưa tối ưu:</strong> <span id="vio-pending"><?php echo (int) $pending; ?></span> ảnh
                &nbsp;·&nbsp; <strong>Đã tối ưu:</strong> <span id="vio-done"><?php echo (int) $done; ?></span>
                &nbsp;·&nbsp; <strong>Đã tiết kiệm:</strong> <span id="vio-saved"><?php echo esc_html(size_format($saved)); ?></span>
-               <?php $cf = VIO_Bulk::current_folder(); if ($cf): ?>&nbsp;·&nbsp; <strong>Đang tới thư mục:</strong> <code><?php echo esc_html($cf); ?></code><?php endif; ?></p>
+               <?php $cf = VPO_Bulk::current_folder(); if ($cf): ?>&nbsp;·&nbsp; <strong>Đang tới thư mục:</strong> <code><?php echo esc_html($cf); ?></code><?php endif; ?></p>
 
-            <?php $cs = VIO_Bulk::cron_status(); if ($cs['enabled']): ?>
+            <?php $cs = VPO_Bulk::cron_status(); if ($cs['enabled']): ?>
                 <p style="padding:8px 12px;border-left:4px solid #2271b1;background:#eef4fb">
                     ⏱ <strong>Lịch nền: BẬT</strong>
                     <?php echo $cs['next'] ? ' · lần tới ' . esc_html(get_date_from_gmt(gmdate('Y-m-d H:i:s', $cs['next']), 'H:i d/m')) : ''; ?>
@@ -408,7 +412,7 @@ class VIG_Image_Optimizer {
                 <label><input type="checkbox" id="vio-backup"> Giữ backup bản gốc (có thể hoàn tác — tốn thêm dung lượng)</label>
             </p>
 
-            <?php $folders = VIO_Bulk::folders(); ?>
+            <?php $folders = VPO_Bulk::folders(); ?>
             <table class="form-table" style="margin-top:4px">
                 <tr>
                     <th scope="row" style="width:170px;padding-left:0">Phạm vi</th>
@@ -532,10 +536,10 @@ class VIG_Image_Optimizer {
         vig_toolkit_register_parent();              // đảm bảo menu cha "VIG Toolkit" tồn tại (idempotent)
         add_submenu_page(
             'vig-toolkit',                          // gắn vào menu cha chung
-            'VIG Image Optimizer',                  // page title
-            'Image Optimizer',                      // menu label
+            'VIG Pix Optimizer',                  // page title
+            'Pix Optimizer',                      // menu label
             'manage_options',
-            'vig-image-optimizer',                  // slug settings của plugin
+            'vig-pix-optimizer',                  // slug settings của plugin
             [__CLASS__, 'page']
         );
     }
@@ -564,6 +568,7 @@ class VIG_Image_Optimizer {
             $cur['png_mode']      = in_array(($in['png_mode'] ?? ''), ['keep','quantize','to_jpeg'], true) ? $in['png_mode'] : $d['png_mode'];
             $cur['png_colors']    = max(2, min(256, (int) ($in['png_colors'] ?? $d['png_colors'])));
             $cur['strip_meta']    = empty($in['strip_meta']) ? 0 : 1;
+            $cur['strip_ai']      = empty($in['strip_ai']) ? 0 : 1;
             $cur['block_over_mb'] = max(0, min(1000, (int) ($in['block_over_mb'] ?? $d['block_over_mb'])));
             $cur['output_format'] = in_array(($in['output_format'] ?? ''), ['original','webp'], true) ? $in['output_format'] : $d['output_format'];
         }
@@ -583,10 +588,10 @@ class VIG_Image_Optimizer {
     public static function page() {
         $o   = self::opts();
         $tab = (isset($_GET['tab']) && 'upload' === $_GET['tab']) ? 'upload' : 'old';
-        $url = admin_url('admin.php?page=vig-image-optimizer');
+        $url = admin_url('admin.php?page=vig-pix-optimizer');
         ?>
         <div class="wrap">
-            <h1>VIG Image Optimizer</h1>
+            <h1>VIG Pix Optimizer</h1>
 
             <h2 class="nav-tab-wrapper" style="margin-bottom:16px">
                 <a href="<?php echo esc_url($url . '&tab=old'); ?>" class="nav-tab <?php echo 'old' === $tab ? 'nav-tab-active' : ''; ?>">
@@ -707,6 +712,10 @@ class VIG_Image_Optimizer {
                                 <td><label><input type="checkbox" name="<?php echo self::OPT; ?>[strip_meta]" value="1" <?php checked($o['strip_meta'],1); ?>> Remove EXIF/ICC data (reduces file size)</label></td>
                             </tr>
                             <tr>
+                                <th scope="row">Xoá dấu vết AI</th>
+                                <td><label><input type="checkbox" name="<?php echo self::OPT; ?>[strip_ai]" value="1" <?php checked($o['strip_ai'],1); ?>> Xoá <strong>C2PA / Content Credentials</strong> + XMP provenance (ảnh AI trông tự nhiên hơn, tránh bị gắn cờ khi đăng web)</label></td>
+                            </tr>
+                            <tr>
                                 <th scope="row"><label>Block oversized images</label></th>
                                 <td><input type="number" name="<?php echo self::OPT; ?>[block_over_mb]" value="<?php echo esc_attr($o['block_over_mb']); ?>" min="0" max="1000"> MB
                                     <p class="description">Reject any image upload larger than this and show an error to the uploader. <strong>0 = disabled</strong>. Default: 10 MB.</p></td>
@@ -801,12 +810,12 @@ class VIG_Image_Optimizer {
         $t = get_transient('vig_imgopt_last');
         if (!$t || empty($t['n'])) return;
         delete_transient('vig_imgopt_last');
-        echo '<div class="notice notice-success is-dismissible"><p><strong>VIG Image Optimizer:</strong> optimized '
+        echo '<div class="notice notice-success is-dismissible"><p><strong>VIG Pix Optimizer:</strong> optimized '
             . (int) $t['n'] . ' image(s), saved ~' . esc_html(size_format($t['saved'], 1)) . '.</p></div>';
     }
 }
 
-add_action('plugins_loaded', ['VIG_Image_Optimizer', 'init']);
+add_action('plugins_loaded', ['VIG_Pix_Optimizer', 'init']);
 
 // Gỡ lịch nền khi tắt plugin.
 register_deactivation_hook(__FILE__, function () {

@@ -1,4 +1,4 @@
-# 🖼️ VIG Image Optimizer
+# 🖼️ VIG Pix Optimizer
 
 **Tự động tối ưu ảnh ngay khi upload — web nhẹ, tải nhanh, khỏi cần thao tác gì.**
 
@@ -8,6 +8,7 @@ Mỗi lần bạn tải ảnh lên Thư viện Media, plugin tự: thu ảnh v�
 
 - ⚡ **Web nhẹ & nhanh hơn** — ảnh gọn ngay từ khi upload.
 - 🤖 **Tự động** — không phải nhớ nén ảnh thủ công.
+- 🤖 **Xoá dấu vết AI** — gỡ chữ ký **C2PA / Content Credentials** + XMP để ảnh AI trông tự nhiên, tránh bị gắn cờ khi đăng web.
 - 🛡️ **An toàn** — chỉ xử lý ảnh MỚI; ảnh cũ nguyên vẹn.
 - 🔧 **Chạy mọi host** — dùng Imagick nếu có (PNG đẹp hơn), không thì fallback GD.
 
@@ -17,11 +18,12 @@ Mỗi lần bạn tải ảnh lên Thư viện Media, plugin tự: thu ảnh v�
 - Chất lượng JPEG tuỳ chỉnh; PNG: giữ / giảm màu / chuyển JPEG.
 - Xuất **WebP** (tự fallback nếu host không hỗ trợ).
 - Xoá metadata (EXIF…); chặn upload ảnh vượt ngưỡng MB.
+- **Xoá dấu vết AI (C2PA/Content Credentials + XMP)** — như PixClean, xử lý nhị phân server-side cho JPG/PNG/WebP.
 
 ## Cài đặt
 
-1. Tải `vig-image-optimizer.zip` từ [Releases](../../releases) → Plugins → Add New → Upload → Activate.
-2. Vào **VIG Toolkit → Image Optimizer**, chỉnh thông số (hoặc để mặc định) → Lưu.
+1. Tải `vig-pix-optimizer.zip` từ [Releases](../../releases) → Plugins → Add New → Upload → Activate.
+2. Vào **VIG Toolkit → Pix Optimizer**, chỉnh thông số (hoặc để mặc định) → Lưu.
 3. Xong — cứ upload ảnh như bình thường, plugin lo phần còn lại.
 
 ## Cập nhật
